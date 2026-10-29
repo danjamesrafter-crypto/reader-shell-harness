@@ -117,14 +117,18 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 "IBM Plex Mono",mon
   function load() {
     S.loading = true; render();
     var all = [], seen = {}, LIMIT = 50;
-    var sorts = ['created:desc,task_id:asc', 'created:desc'], si = 0;
-    function cols() { return SAFE + (accepted && accepted.length ? ',' + accepted.join(',') : ''); }
+    // Attempts, most useful first. Every extra column passes a 1-row probe, yet the full page can still
+    // 500 (seen on r6nvg8), so the last resort is Task Manager's own sort and the safe columns only.
+    var attempts = [
+      { sort: 'created:desc,task_id:asc', extra: true },
+      { sort: 'created:desc', extra: true },
+      { sort: 'created:desc', extra: false }
+    ], ai = 0;
+    function cols() { return SAFE + (attempts[ai].extra && accepted && accepted.length ? ',' + accepted.join(',') : ''); }
     function get(skip) {
-      // Stable order: created alone repeats and skips rows when timestamps tie (seen on the Sandbox test).
-      // The multi-key sort is unverified syntax, so fall back to Task Manager's single key.
-      return api('GET', '/api/tasks/reader', { limit: LIMIT, skip: skip, sort: sorts[si], columns: cols() }).catch(function (e) {
-        if (si === sorts.length - 1) throw e;
-        si++; note('  retrying with sort=' + sorts[si]);
+      return api('GET', '/api/tasks/reader', { limit: LIMIT, skip: skip, sort: attempts[ai].sort, columns: cols() }).catch(function (e) {
+        if (ai === attempts.length - 1 || skip > 0) throw e;
+        ai++; note('  retrying with sort=' + attempts[ai].sort + (attempts[ai].extra ? '' : ' and safe columns only'));
         return get(skip);
       });
     }
@@ -134,12 +138,23 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 "IBM Plex Mono",mon
         rows.forEach(function (t) { var k = t._id || t.id || t.task_id; if (!seen[k]) { seen[k] = 1; all.push(t); } });
         var total = r && typeof r.total === 'number' ? r.total : null;
         if (rows.length === LIMIT && (total == null || all.length < total) && skip < 2000) return page(skip + LIMIT);
-        note('Loaded ' + all.length + (total != null ? ' of ' + total : '') + ' tasks with sort ' + sorts[si] + '.');
+        note('Loaded ' + all.length + (total != null ? ' of ' + total : '') + ' tasks (sort ' + attempts[ai].sort + ', ' + (attempts[ai].extra ? 'extra columns' : 'safe columns') + ').');
       });
     }
     return (accepted ? Promise.resolve() : probe()).then(function () { return page(0); })
-      .then(function () { S.tasks = all; S.loading = false; S.error = null; render(); })
+      .then(function () { S.tasks = all; S.loading = false; S.error = null; render(); if (!attempts[ai].extra && !findCulprit.done) findCulprit(); })
       .catch(function (e) { fail('Could not load tasks: ' + (e && (e.message || e.status) || e)); });
+  }
+
+  // Which extra column breaks a full page? Test each one at the real page size and log it for the spike.
+  function findCulprit() {
+    findCulprit.done = true;
+    return (accepted || []).reduce(function (p, col) {
+      return p.then(function () {
+        return api('GET', '/api/tasks/reader', { limit: 50, skip: 0, sort: 'created:desc', columns: SAFE + ',' + col })
+          .then(function () { note('  full page with ' + col + ': ok'); }, function () { note('  full page with ' + col + ': FAILS'); });
+      });
+    }, Promise.resolve()).then(render);
   }
 
   function isMine(t) { var a = t.assignee; return a && a.type === 'user' && S.user && a.id === S.user._id; }
