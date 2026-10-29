@@ -60,7 +60,6 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 "IBM Plex Mono",mon
 (function () {
   'use strict';
   var app = document.getElementById('app');
-  var COLS = 'task_id,status,priority,protocol_id,protocol_label,protocol_version,assignee,staffing_pool,due_date,created,read_number,parents.project,transitions';
   var S = { ext: null, user: null, origin: '', tasks: [], tab: 'mine', focus: null, q: '', loading: true, error: null, log: [], canWrite: false, toast: '' };
 
   function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -98,18 +97,35 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 "IBM Plex Mono",mon
     return S.ext.apiRequest(method, path, params, body).then(function (r) { note('  ok'); return r; }, function (e) { note('  failed: ' + (e && (e.status || e.message) || e)); throw e; });
   }
 
+  // Task Manager's own column list (known to work on 23.x) minus the unblinding ones
+  // (parent_details.project_label, parent_details.subject_label, creator).
+  var SAFE = 'task_id,created,status,priority,protocol_label,assignee,parents,parent_ref,due_date,subcategory';
+  // Extra columns the shell wants; each is probed once so the spike learns which ones the server accepts.
+  var EXTRA = ['staffing_pool', 'protocol_id', 'protocol_version', 'read_number', 'transitions', 'modified'];
+  var accepted = null;
+
+  function probe() {
+    accepted = [];
+    return EXTRA.reduce(function (p, col) {
+      return p.then(function () {
+        return api('GET', '/api/tasks/reader', { limit: 1, skip: 0, columns: SAFE + ',' + col })
+          .then(function () { accepted.push(col); note('  column ' + col + ': accepted'); }, function () { note('  column ' + col + ': rejected'); });
+      });
+    }, Promise.resolve());
+  }
+
   function load() {
     S.loading = true; render();
-    var all = [], seen = {}, LIMIT = 100;
-    // Stable order: created alone repeats and skips rows when timestamps tie (seen on the Sandbox test).
-    // The multi-key sort and dotted column are unverified syntax, so fall back to Task Manager's own form.
-    var params = { sort: 'created:desc,task_id:asc', columns: COLS };
+    var all = [], seen = {}, LIMIT = 50;
+    var sorts = ['created:desc,task_id:asc', 'created:desc'], si = 0;
+    function cols() { return SAFE + (accepted && accepted.length ? ',' + accepted.join(',') : ''); }
     function get(skip) {
-      return api('GET', '/api/tasks/reader', Object.assign({ limit: LIMIT, skip: skip }, params)).catch(function (e) {
-        if (params.sort === 'created:desc') throw e;
-        note('  retrying with sort=created:desc and columns=parents');
-        params = { sort: 'created:desc', columns: COLS.replace('parents.project', 'parents') };
-        return api('GET', '/api/tasks/reader', Object.assign({ limit: LIMIT, skip: skip }, params));
+      // Stable order: created alone repeats and skips rows when timestamps tie (seen on the Sandbox test).
+      // The multi-key sort is unverified syntax, so fall back to Task Manager's single key.
+      return api('GET', '/api/tasks/reader', { limit: LIMIT, skip: skip, sort: sorts[si], columns: cols() }).catch(function (e) {
+        if (si === sorts.length - 1) throw e;
+        si++; note('  retrying with sort=' + sorts[si]);
+        return get(skip);
       });
     }
     function page(skip) {
@@ -118,10 +134,11 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 "IBM Plex Mono",mon
         rows.forEach(function (t) { var k = t._id || t.id || t.task_id; if (!seen[k]) { seen[k] = 1; all.push(t); } });
         var total = r && typeof r.total === 'number' ? r.total : null;
         if (rows.length === LIMIT && (total == null || all.length < total) && skip < 2000) return page(skip + LIMIT);
-        note('Loaded ' + all.length + (total != null ? ' of ' + total : '') + ' tasks.');
+        note('Loaded ' + all.length + (total != null ? ' of ' + total : '') + ' tasks with sort ' + sorts[si] + '.');
       });
     }
-    return page(0).then(function () { S.tasks = all; S.loading = false; S.error = null; render(); })
+    return (accepted ? Promise.resolve() : probe()).then(function () { return page(0); })
+      .then(function () { S.tasks = all; S.loading = false; S.error = null; render(); })
       .catch(function (e) { fail('Could not load tasks: ' + (e && (e.message || e.status) || e)); });
   }
 
