@@ -84,7 +84,7 @@ textarea.fld{height:auto;min-height:96px;padding:10px 12px;border-radius:12px;re
 .idbtn{border:none;background:none;padding:0;color:#A9D2FA;font:500 13px "IBM Plex Mono",ui-monospace,monospace;text-decoration:underline;text-decoration-color:rgba(169,210,250,.35);text-underline-offset:3px}
 .idbtn:hover{color:#fff}
 .scrim{position:fixed;inset:0;background:rgba(3,6,12,.6);z-index:20;border:none;padding:0;cursor:default}
-.drawer{position:fixed;top:0;right:0;bottom:0;width:440px;max-width:100%;z-index:21;background:var(--panel);border-left:1px solid var(--line);box-shadow:-24px 0 48px rgba(0,0,0,.45);overflow-y:auto;padding:22px;display:flex;flex-direction:column;gap:18px}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:440px;max-width:100%;z-index:21;background:var(--panel);border-left:1px solid var(--line);box-shadow:-24px 0 48px rgba(0,0,0,.45);overflow-y:auto;padding:64px 22px 22px;display:flex;flex-direction:column;gap:18px}
 .kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .kv div{display:flex;flex-direction:column;gap:2px}.kv span{font-size:12px;color:var(--mute)}
 .tl{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
@@ -126,6 +126,7 @@ textarea.fld{height:auto;min-height:96px;padding:10px 12px;border-radius:12px;re
         clearTimeout(timer);
         S.ext = ext; S.user = ext.user || null; S.origin = flywheelOrigin(); S.canWrite = true;
         note('Connected. Origin ' + (S.origin || 'unknown') + '. User ' + (S.user ? S.user._id : 'unknown') + '. Opened from ' + (ext.container ? ext.container.container_type + ' ' + ext.container._id : 'no container') + '.');
+        fromHash();
         return load();
       })
       .catch(function (e) { clearTimeout(timer); fail('Could not connect: ' + (e && e.message || e)); });
@@ -184,7 +185,7 @@ textarea.fld{height:auto;min-height:96px;padding:10px 12px;border-radius:12px;re
       });
     }
     return (accepted ? Promise.resolve() : probe()).then(function () { return page(0); })
-      .then(function () { S.tasks = all; S.loading = false; S.error = null; render(); if (!attempts[ai].extra && !findCulprit.done) findCulprit(); })
+      .then(function () { S.tasks = all; S.loading = false; S.error = null; if (pendingTask) { fromHash(); if (pendingTask) { flash('Task ' + pendingTask + ' isn\u2019t in your list.'); pendingTask = null; S.screen = 'reads'; } } render(); if (!attempts[ai].extra && !findCulprit.done) findCulprit(); })
       .catch(function (e) { fail('Could not load tasks: ' + (e && (e.message || e.status) || e)); });
   }
 
@@ -224,6 +225,41 @@ textarea.fld{height:auto;min-height:96px;padding:10px 12px;border-radius:12px;re
   }
   function flash(m) { S.toast = m; render(); clearTimeout(flash.t); flash.t = setTimeout(function () { S.toast = ''; render(); }, 3000); }
 
+  // ---- Internal routes -------------------------------------------------------------------------
+  // The page's own hash holds where the reader is, so the same links work unchanged once the shell is
+  // mounted at /reader/ (e.g. /reader/#/task/R-1-1). Inside the Flywheel overlay they aren't visible.
+  //   #/reads[?tab=mine|pool|done][&focus=overdue|soon|inprog|high]   #/task/<task_id>
+  //   #/activity   #/resources   #/help[?task=<task_id>]   #/queries
+  var SCREENS = ['reads', 'queries', 'activity', 'resources', 'help'];
+  function toHash() {
+    var t = S.sel ? S.tasks.filter(function (x) { return (x._id || x.id) === S.sel; })[0] : null;
+    if (t) return '#/task/' + encodeURIComponent(t.task_id);
+    var q = [];
+    if (S.screen === 'reads') { if (S.tab !== 'mine') q.push('tab=' + S.tab); if (S.focus) q.push('focus=' + S.focus); }
+    if (S.screen === 'help' && S.hTask) q.push('task=' + encodeURIComponent(S.hTask));
+    return '#/' + S.screen + (q.length ? '?' + q.join('&') : '');
+  }
+  var pendingTask = null;
+  function fromHash() {
+    var h = (location.hash || '').replace(/^#\/?/, ''), path = h.split('?')[0], qs = {};
+    (h.split('?')[1] || '').split('&').forEach(function (kv) { if (kv) { var p = kv.split('='); qs[p[0]] = decodeURIComponent(p[1] || ''); } });
+    var parts = path.split('/');
+    S.sel = null;
+    if (parts[0] === 'task' && parts[1]) {
+      var id = decodeURIComponent(parts[1]), t = S.tasks.filter(function (x) { return x.task_id === id; })[0];
+      S.screen = 'reads';
+      if (t) { S.sel = t._id || t.id; S.tab = isMine(t) ? (t.status === 'completed' ? 'done' : 'mine') : 'pool'; pendingTask = null; }
+      else if (S.ext && !S.loading && S.tasks.length) { pendingTask = null; setTimeout(function () { flash('Task ' + id + ' isn\u2019t in your list.'); }, 0); }
+      else pendingTask = id; // tasks not loaded yet; resolved after load
+      return;
+    }
+    S.screen = SCREENS.indexOf(parts[0]) > -1 ? parts[0] : 'reads';
+    if (S.screen === 'reads') { S.tab = ['mine', 'pool', 'done'].indexOf(qs.tab) > -1 ? qs.tab : 'mine'; S.focus = FOCUS[qs.focus] ? qs.focus : null; }
+    if (S.screen === 'help') S.hTask = qs.task || '';
+  }
+  function syncHash() { var want = toHash(); if (location.hash !== want) { try { history.replaceState(null, '', want); } catch (e) { location.hash = want; } } }
+  window.addEventListener('hashchange', function () { fromHash(); render(); });
+
   function render() {
     if (S.error && !S.tasks.length) {
       app.innerHTML = '<div class="wrap"><div class="banner"><b>Not connected.</b> ' + esc(S.error) + '</div>' + diag() + '</div>';
@@ -237,6 +273,7 @@ textarea.fld{height:auto;min-height:96px;padding:10px 12px;border-radius:12px;re
     app.innerHTML = '<div class="shell">' + rail(ctx) + '<main class="main"><div class="wrap">' + body + diag() + '</div></main></div>' +
       drawer(ctx) + (S.toast ? '<div class="toast" role="status">' + esc(S.toast) + '</div>' : '');
     bind(ctx.list);
+    if (S.ext && !S.loading) syncHash();
   }
 
   function rail(c) {
@@ -388,7 +425,7 @@ textarea.fld{height:auto;min-height:96px;padding:10px 12px;border-radius:12px;re
 
   function diag() {
     var sample = S.tasks[0] ? JSON.stringify(S.tasks[0], null, 2) : '(none)';
-    return '<details><summary>Diagnostics for the spike: calls made and one raw task</summary><pre>' + esc(S.log.join('\n')) + '</pre><pre>' + esc(sample) + '</pre></details>';
+    return '<details><summary>Diagnostics for the spike: calls made and one raw task</summary><pre>Route: ' + esc(location.hash || '#/reads') + '\n' + esc(S.log.join('\n')) + '</pre><pre>' + esc(sample) + '</pre></details>';
   }
 
   function bind(list) {
