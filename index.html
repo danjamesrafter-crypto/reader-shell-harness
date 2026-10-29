@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reader Shell (live harness)</title>
+<!--
+  Reader Shell, live-data harness. Runs as a Flywheel extension app (Viewer type, matched to projects).
+  All data comes through the Extension SDK's apiRequest proxy, so this page never sees a token.
+  Requests ask only for blinded columns: no project, subject, session or file labels, no creator.
+  Spike harness, not the product: the product mounts at /reader/ (see requirements doc RS-R1/R2).
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@500&family=Noto+Serif:wght@400&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#070D18;--panel:#0E1A2B;--line:#1E2F4A;--line2:#27395A;--fg:#E7EAF0;--mute:#A3ACBA;--dim:#7F8897;--accent:#2269E9;--warn:#F0B35E;--bad:#FF9B8A;--ok:#7FE0C0}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 "Inter Tight",system-ui,sans-serif}
+button{font:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #5AA9F0;outline-offset:2px}
+.wrap{max-width:1200px;margin:0 auto;padding:20px 16px 40px;display:flex;flex-direction:column;gap:18px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:12px;color:#C9D0DA}
+h1{margin:0;font:400 30px/1.15 "Noto Serif",Georgia,serif;letter-spacing:-.01em}
+h1 em{font-style:normal;color:#34B8F5}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.card{display:flex;flex-direction:column;gap:2px;text-align:left;padding:12px 14px;border-radius:12px;background:var(--panel);border:1px solid var(--line);color:var(--fg)}
+.card[aria-pressed="true"]{border-color:var(--accent);background:#132544}
+.card:disabled{opacity:.55;cursor:default}
+.card b{font-size:24px;font-weight:500}
+.card span{font-size:12px;color:var(--mute)}
+.tabs{display:flex;gap:18px;border-bottom:1px solid var(--line)}
+.tab{border:none;background:none;color:var(--mute);padding:10px 0;border-bottom:2px solid transparent;font-weight:500}
+.tab[aria-selected="true"]{color:#fff;border-color:var(--accent)}
+.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.fld{height:38px;padding:0 12px;border-radius:999px;border:1px solid var(--line2);background:#0B1525;color:var(--fg);font:inherit;font-size:13px}
+.tbl{border:1px solid var(--line);border-radius:12px;overflow:auto;background:#0A1424}
+table{width:100%;border-collapse:collapse;min-width:720px}
+th{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);text-align:left;padding:10px 14px;border-bottom:1px solid var(--line)}
+td{padding:11px 14px;border-bottom:1px solid #132238;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:13px}
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;background:#16253C;color:#C9D0DA}
+.btn{height:34px;padding:0 16px;border-radius:999px;border:1px solid var(--line2);background:transparent;color:var(--fg);font-weight:600;font-size:13px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn:disabled{opacity:.5;cursor:default}
+.muted{color:var(--mute)}
+.empty{padding:28px;text-align:center;color:var(--mute)}
+details{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:10px 14px}
+summary{cursor:pointer;color:#A9D2FA;font-size:13px}
+pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 "IBM Plex Mono",monospace;color:#C9D0DA;margin:10px 0 0}
+.banner{padding:12px 14px;border-radius:12px;border:1px solid rgba(240,179,94,.45);background:rgba(240,179,94,.08)}
+.toast{position:fixed;right:16px;bottom:16px;padding:10px 14px;border-radius:10px;background:#162842;border:1px solid var(--line2)}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><p class="muted">Connecting to Flywheel…</p></div>
+<script src="https://cdn.flywheel.io/sdk/extension/flywheel-extension-0.14.9.min.js"></script>
+<script>
+(function () {
+  'use strict';
+  var app = document.getElementById('app');
+  var COLS = 'task_id,status,priority,protocol_id,protocol_label,protocol_version,assignee,staffing_pool,due_date,created,read_number,parents.project,transitions';
+  var S = { ext: null, user: null, origin: '', tasks: [], tab: 'mine', focus: null, q: '', loading: true, error: null, log: [], canWrite: false, toast: '' };
+
+  function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function note(line) { S.log.push(new Date().toLocaleTimeString() + '  ' + line); }
+  // Due dates are calendar days: read the date part so midnight UTC doesn't slip to the previous local day
+  function day(iso) { var p = String(iso).slice(0, 10).split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+  function days(iso) { if (!iso) return null; var t = new Date(); t.setHours(0,0,0,0); return Math.round((day(iso) - t) / 864e5); }
+  function fmt(iso) { return iso ? day(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '—'; }
+  var PRI = { blocker: 0, high: 1, medium: 2, low: 3 };
+  var PCOL = { blocker: 'var(--bad)', high: 'var(--warn)', medium: '#C9D0DA', low: '#8F98A7' };
+  function cap(w) { return w ? w.charAt(0).toUpperCase() + w.slice(1) : ''; }
+
+  function flywheelOrigin() {
+    try { if (location.ancestorOrigins && location.ancestorOrigins.length) return location.ancestorOrigins[0]; } catch (e) {}
+    try { return new URL(document.referrer).origin; } catch (e) { return ''; }
+  }
+
+  function connect() {
+    if (!window.Flywheel || !Flywheel.initExtension) { fail('The Flywheel Extension SDK did not load from cdn.flywheel.io.'); return; }
+    var timer = setTimeout(function () { if (!S.ext) fail('No connection from Flywheel. Open this page from a project\'s Applications menu inside Flywheel, not directly.'); }, 8000);
+    Flywheel.initExtension({ scope: 'ReadWrite', validateOrigin: function (o) { return /^https:\/\/[a-z0-9.-]+\.flywheel\.io$/.test(o); } })
+      .then(function (ext) {
+        clearTimeout(timer);
+        S.ext = ext; S.user = ext.user || null; S.origin = flywheelOrigin(); S.canWrite = true;
+        note('Connected. Origin ' + (S.origin || 'unknown') + '. User ' + (S.user ? S.user._id : 'unknown') + '. Opened from ' + (ext.container ? ext.container.container_type + ' ' + ext.container._id : 'no container') + '.');
+        return load();
+      })
+      .catch(function (e) { clearTimeout(timer); fail('Could not connect: ' + (e && e.message || e)); });
+  }
+
+  function fail(msg) { S.loading = false; S.error = msg; note('ERROR ' + msg); render(); }
+
+  function api(method, path, params, body) {
+    note(method + ' ' + path + (params ? ' ' + JSON.stringify(params) : ''));
+    return S.ext.apiRequest(method, path, params, body).then(function (r) { note('  ok'); return r; }, function (e) { note('  failed: ' + (e && (e.status || e.message) || e)); throw e; });
+  }
+
+  function load() {
+    S.loading = true; render();
+    var all = [], seen = {}, LIMIT = 100;
+    // Stable order: created alone repeats and skips rows when timestamps tie (seen on the Sandbox test).
+    // The multi-key sort and dotted column are unverified syntax, so fall back to Task Manager's own form.
+    var params = { sort: 'created:desc,task_id:asc', columns: COLS };
+    function get(skip) {
+      return api('GET', '/api/tasks/reader', Object.assign({ limit: LIMIT, skip: skip }, params)).catch(function (e) {
+        if (params.sort === 'created:desc') throw e;
+        note('  retrying with sort=created:desc and columns=parents');
+        params = { sort: 'created:desc', columns: COLS.replace('parents.project', 'parents') };
+        return api('GET', '/api/tasks/reader', Object.assign({ limit: LIMIT, skip: skip }, params));
+      });
+    }
+    function page(skip) {
+      return get(skip).then(function (r) {
+        var rows = Array.isArray(r) ? r : (r && (r.results || r.items || r.data)) || [];
+        rows.forEach(function (t) { var k = t._id || t.id || t.task_id; if (!seen[k]) { seen[k] = 1; all.push(t); } });
+        var total = r && typeof r.total === 'number' ? r.total : null;
+        if (rows.length === LIMIT && (total == null || all.length < total) && skip < 2000) return page(skip + LIMIT);
+        note('Loaded ' + all.length + (total != null ? ' of ' + total : '') + ' tasks.');
+      });
+    }
+    return page(0).then(function () { S.tasks = all; S.loading = false; S.error = null; render(); })
+      .catch(function (e) { fail('Could not load tasks: ' + (e && (e.message || e.status) || e)); });
+  }
+
+  function isMine(t) { var a = t.assignee; return a && a.type === 'user' && S.user && a.id === S.user._id; }
+  function isPool(t) { var a = t.assignee; return (a && a.type === 'staffing_pool') || (!a && t.staffing_pool); }
+  function open(t) { return t.status !== 'completed' && t.status !== 'cancelled'; }
+
+  var FOCUS = {
+    overdue: { label: 'Overdue', hint: 'Past due date', test: function (t) { var d = days(t.due_date); return d != null && d < 0; } },
+    soon: { label: 'Due within 2 days', hint: 'Today and the next two days', test: function (t) { var d = days(t.due_date); return d != null && d >= 0 && d <= 2; } },
+    inprog: { label: 'In progress', hint: 'Drafts to finish', test: function (t) { return t.status === 'in_progress'; } },
+    high: { label: 'Blocker or high', hint: 'Flagged by the study team', test: function (t) { return t.priority === 'blocker' || t.priority === 'high'; } }
+  };
+
+  function viewerUrl(t) {
+    var pid = t.parents && t.parents.project;
+    return pid && S.origin ? S.origin + '/ohif-viewer-v3/project/' + pid + '/reader?taskId=' + encodeURIComponent(t._id || t.id) : null;
+  }
+
+  function claim(t) {
+    var id = t._id || t.id;
+    api('PUT', '/api/tasks/reader/' + id + '/assign', undefined, { assignee: { type: 'user', id: S.user._id } })
+      .then(function () { flash(t.task_id + ' claimed'); return load(); })
+      .catch(function (e) { flash('Claim failed (' + (e && (e.status || e.message) || 'error') + '). See diagnostics.'); render(); });
+  }
+  function flash(m) { S.toast = m; render(); clearTimeout(flash.t); flash.t = setTimeout(function () { S.toast = ''; render(); }, 3000); }
+
+  function render() {
+    if (S.error && !S.tasks.length) {
+      app.innerHTML = '<div class="banner"><b>Not connected.</b> ' + esc(S.error) + '</div>' + diag();
+      bind(); return;
+    }
+    var mine = S.tasks.filter(function (t) { return isMine(t) && open(t); });
+    var pool = S.tasks.filter(function (t) { return isPool(t) && open(t); });
+    var done = S.tasks.filter(function (t) { return isMine(t) && t.status === 'completed'; });
+    var od = mine.filter(FOCUS.overdue.test).length;
+    var first = S.user ? cap(S.user.firstname) : '';
+    var hr = new Date().getHours(), greet = hr < 12 ? 'Good morning' : hr < 18 ? 'Good afternoon' : 'Good evening';
+
+    var list = S.tab === 'mine' ? mine : S.tab === 'pool' ? pool : done;
+    if (S.tab === 'mine' && S.focus) list = list.filter(FOCUS[S.focus].test);
+    if (S.q) { var q = S.q.toLowerCase(); list = list.filter(function (t) { return (t.task_id + ' ' + t.protocol_label).toLowerCase().indexOf(q) > -1; }); }
+    list = list.slice().sort(S.tab === 'done'
+      ? function (a, b) { return String(b.modified || b.created).localeCompare(String(a.modified || a.created)); }
+      : function (a, b) { var ia = a.status === 'in_progress' ? 0 : 1, ib = b.status === 'in_progress' ? 0 : 1; return ia - ib || (PRI[a.priority] - PRI[b.priority]) || String(a.due_date || '9').localeCompare(String(b.due_date || '9')); });
+
+    var h = '';
+    h += '<div class="top"><span class="chip">Reader Shell · live harness' + (S.user ? ' · ' + esc(S.user.firstname + ' ' + S.user.lastname) : '') + '</span><span class="chip">Blinded reading environment</span></div>';
+    h += '<h1>' + esc(greet) + (first ? ', ' + esc(first) : '') + '. ' + (od ? 'You have <em>' + od + ' overdue read' + (od > 1 ? 's' : '') + '</em>.' : 'Nothing overdue.') + '</h1>';
+    if (S.loading) h += '<p class="muted">Loading your tasks…</p>';
+    h += '<div class="cards">' + Object.keys(FOCUS).map(function (k) {
+      var n = mine.filter(FOCUS[k].test).length;
+      return '<button class="card" data-focus="' + k + '" aria-pressed="' + (S.focus === k) + '"' + (n ? '' : ' disabled') + '><b>' + n + '</b>' + esc(FOCUS[k].label) + '<span>' + esc(FOCUS[k].hint) + '</span></button>';
+    }).join('') + '</div>';
+    h += '<div class="tabs" role="tablist">' + [['mine', 'Assigned to me', mine.length], ['pool', 'Available to claim', pool.length], ['done', 'Completed', done.length]].map(function (x) {
+      return '<button class="tab" role="tab" data-tab="' + x[0] + '" aria-selected="' + (S.tab === x[0]) + '">' + x[1] + ' <span class="muted">' + x[2] + '</span></button>';
+    }).join('') + '</div>';
+    h += '<div class="bar"><input class="fld" id="q" type="search" placeholder="Task ID or protocol" value="' + esc(S.q) + '" aria-label="Search tasks">' +
+      (S.focus ? '<button class="btn" data-clear="1">Clear filter: ' + esc(FOCUS[S.focus].label) + '</button>' : '') +
+      '<button class="btn" data-reload="1">Refresh</button></div>';
+    if (!list.length) h += '<div class="tbl"><div class="empty">' + (S.loading ? 'Loading…' : 'No tasks here.') + '</div></div>';
+    else {
+      h += '<div class="tbl"><table><thead><tr><th>Task</th><th>Protocol</th><th>Read</th><th>Priority</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>';
+      list.forEach(function (t, i) {
+        var d = days(t.due_date), due = t.due_date ? (d < 0 ? '<span style="color:var(--bad)">Overdue · ' + fmt(t.due_date) + '</span>' : d === 0 ? '<span style="color:var(--warn)">Due today</span>' : d === 1 ? '<span style="color:var(--warn)">Due tomorrow</span>' : 'Due ' + fmt(t.due_date)) : '<span class="muted">No due date</span>';
+        var act = '';
+        if (S.tab === 'pool') act = '<button class="btn" data-claim="' + i + '"' + (S.canWrite ? '' : ' disabled') + '>Claim</button>';
+        else if (S.tab === 'mine') act = viewerUrl(t) ? '<button class="btn primary" data-open="' + i + '">' + (t.status === 'in_progress' ? 'Resume' : 'Start') + '</button>' : '<span class="muted">No viewer link</span>';
+        else act = '<span class="muted">Locked</span>';
+        h += '<tr><td class="mono">' + esc(t.task_id) + '</td><td>' + esc(t.protocol_label) + ' <span class="muted">v' + esc(t.protocol_version) + '</span></td><td>' + (t.read_number ? 'Read ' + esc(t.read_number) : '—') +
+          '</td><td><span style="color:' + (PCOL[t.priority] || '#C9D0DA') + '">● </span>' + esc(cap(t.priority)) + '</td><td>' + due + '</td><td><span class="pill">' + esc((t.status || '').replace('_', ' ')) + '</span></td><td style="text-align:right">' + act + '</td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+    h += diag();
+    if (S.toast) h += '<div class="toast" role="status">' + esc(S.toast) + '</div>';
+    app.innerHTML = h;
+    bind(list);
+  }
+
+  function diag() {
+    var sample = S.tasks[0] ? JSON.stringify(S.tasks[0], null, 2) : '(none)';
+    return '<details><summary>Diagnostics for the spike: calls made and one raw task</summary><pre>' + esc(S.log.join('\n')) + '</pre><pre>' + esc(sample) + '</pre></details>';
+  }
+
+  function bind(list) {
+    app.querySelectorAll('[data-focus]').forEach(function (b) { b.onclick = function () { var k = b.getAttribute('data-focus'); S.focus = S.focus === k ? null : k; S.tab = 'mine'; render(); }; });
+    app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { S.tab = b.getAttribute('data-tab'); S.focus = null; render(); }; });
+    app.querySelectorAll('[data-open]').forEach(function (b) { b.onclick = function () { var t = list[+b.getAttribute('data-open')]; var u = viewerUrl(t); note('open viewer ' + u); window.open(u, '_blank', 'noopener'); }; });
+    app.querySelectorAll('[data-claim]').forEach(function (b) { b.onclick = function () { b.disabled = true; claim(list[+b.getAttribute('data-claim')]); }; });
+    var c = app.querySelector('[data-clear]'); if (c) c.onclick = function () { S.focus = null; render(); };
+    var r = app.querySelector('[data-reload]'); if (r) r.onclick = function () { load(); };
+    var q = document.getElementById('q');
+    if (q) q.oninput = function () { S.q = q.value; var pos = q.selectionStart; render(); var n = document.getElementById('q'); n.focus(); n.setSelectionRange(pos, pos); };
+  }
+
+  // Refresh when the reader comes back from the viewer tab
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && S.ext && !S.loading) load(); });
+  connect();
+})();
+</script>
+</body>
+</html>
