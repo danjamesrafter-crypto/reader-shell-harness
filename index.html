@@ -97,9 +97,10 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 "IBM Plex Mono",mon
     return S.ext.apiRequest(method, path, params, body).then(function (r) { note('  ok'); return r; }, function (e) { note('  failed: ' + (e && (e.status || e.message) || e)); throw e; });
   }
 
-  // Task Manager's own column list (known to work on 23.x) minus the unblinding ones
-  // (parent_details.project_label, parent_details.subject_label, creator).
-  var SAFE = 'task_id,created,status,priority,protocol_label,assignee,parents,parent_ref,due_date,subcategory';
+  // Task Manager's own column list (known to work on 23.x) minus the unblinding ones:
+  // parent_details.project_label, parent_details.subject_label, creator, and parent_ref
+  // (parent_ref carries the container label, e.g. "Session 3", seen on r6nvg8).
+  var SAFE = 'task_id,created,status,priority,protocol_label,assignee,parents,due_date,subcategory';
   // Extra columns the shell wants; each is probed once so the spike learns which ones the server accepts.
   var EXTRA = ['staffing_pool', 'protocol_id', 'protocol_version', 'read_number', 'transitions', 'modified'];
   var accepted = null;
