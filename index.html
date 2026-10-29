@@ -153,7 +153,7 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     Flywheel.initExtension({ scope: 'ReadWrite', validateOrigin: function (o) { return /^https:\/\/[a-z0-9.-]+\.flywheel\.io$/.test(o); } })
       .then(function (ext) {
         clearTimeout(timer);
-        S.ext = ext; S.user = ext.user || null; S.origin = flywheelOrigin(); S.canWrite = true;
+        S.ext = ext; S.user = ext.user || null; S.params = ext.params || {}; S.origin = flywheelOrigin(); S.canWrite = true;
         note('Connected. Origin ' + (S.origin || 'unknown') + '. User ' + (S.user ? S.user._id : 'unknown') + '. Opened from ' + (ext.container ? ext.container.container_type + ' ' + ext.container._id : 'no container') + '.');
         fromHash();
         return load();
@@ -173,7 +173,7 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
   // (parent_ref carries the container label, e.g. "Session 3", seen on r6nvg8).
   var SAFE = 'task_id,created,status,priority,protocol_label,assignee,parents,due_date,subcategory';
   // Extra columns the shell wants; each is probed once so the spike learns which ones the server accepts.
-  var EXTRA = ['staffing_pool', 'protocol_id', 'protocol_version', 'read_number', 'transitions', 'modified'];
+  var EXTRA = ['staffing_pool', 'protocol_id', 'protocol_version', 'read_number', 'transitions', 'modified', 'parent_ref.type', 'parent_ref.id'];
   var accepted = null;
 
   function probe() {
@@ -226,7 +226,7 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     after.forEach(function (t) {
       var o = prev[t._id || t.id];
       if (!o) { if (isMine(t)) msgs.push(t.task_id + ' was assigned to you'); return; }
-      if (o.status !== t.status && isMine(t)) msgs.push(t.task_id + (t.status === 'completed' ? ' submitted' : t.status === 'in_progress' ? ' saved as a draft' : ' is now ' + t.status.replace('_', ' ')));
+      if (o.status !== t.status && isMine(t)) msgs.push(t.task_id + (t.status === 'completed' ? (needsHandoff(t) ? ' submitted \u2014 send it on from Completed' : ' submitted') : t.status === 'in_progress' ? ' saved as a draft' : ' is now ' + t.status.replace('_', ' ')));
       else if (o.modified && t.modified && o.modified !== t.modified && isMine(t) && t.status === 'in_progress') msgs.push(t.task_id + ' draft saved');
     });
     if (msgs.length) flash(msgs.length > 2 ? msgs.length + ' tasks updated' : msgs.join(' \u00b7 '));
@@ -300,6 +300,54 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     var single = c.projs.length <= 1;
     var row2 = single ? '' : '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:-6px">' + sw + '</div>';
     return '<div class="top"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + chip + (single ? sw : '') + work + '</div><span class="chip">' + ICON.lock.replace('<svg ', '<svg style="width:14px;height:14px" ') + ' Blinded reading environment</span></div>' + row2;
+  }
+
+  // ---- Hand-off after a read (WRC workflow) ---------------------------------------------------------
+  // After submitting, the reader applies a tag to the object the task is on (session, acquisition or file).
+  // A gear rule watching for that tag moves the data to the next phase, so the viewer needs no extra logic.
+  // Which tag(s) a protocol uses is set by an admin in this app's "Application options" JSON, e.g.
+  //   {"handoff": {"Single": {"tags": ["wrc-read-complete"], "label": "Send to grading QC"}, "*": {...}}}
+  // keyed by protocol label, protocol id or "*". Readers never type tags.
+  var DEMO_HANDOFF = { tags: ['read-complete'], label: 'Send to next phase', demo: true };
+  function handoffFor(t) {
+    var h = (S.params && S.params.handoff) || null;
+    if (!h) return DEMO_HANDOFF;
+    return h[t.protocol_id] || h[t.protocol_label] || h['*'] || null;
+  }
+  // The object the task points at, from IDs only (no labels): parent_ref when the server returns it,
+  // otherwise the most specific of parents.file > acquisition > session.
+  function targetOf(t) {
+    var r = t.parent_ref, pr = t.parents || {};
+    if (r && r.type && r.id) return { type: r.type, id: r.id };
+    if (pr.file) return { type: 'file', id: pr.file };
+    if (pr.acquisition) return { type: 'acquisition', id: pr.acquisition };
+    if (pr.session) return { type: 'session', id: pr.session };
+    return null;
+  }
+  var SENT = {};
+  try { SENT = JSON.parse(localStorage.getItem('readerShell.handoffs') || '{}'); } catch (e) {}
+  function sentAt(t) { return SENT[t._id || t.id]; }
+  function needsHandoff(t) { return isMine(t) && t.status === 'completed' && !!handoffFor(t) && !!targetOf(t) && !sentAt(t); }
+  function handoff(tasks) {
+    var list = tasks.filter(needsHandoff);
+    if (!list.length) return;
+    S.busy = true; render();
+    var ok = 0, fails = [];
+    list.reduce(function (p, t) {
+      return p.then(function () {
+        var h = handoffFor(t), tg = targetOf(t);
+        var call = tg.type === 'file'
+          ? api('PATCH', '/api/files/' + tg.id + '/tags', undefined, h.tags)
+          : api('PATCH', '/api/containers/' + tg.id + '/tags', undefined, h.tags);
+        return call.then(function () {
+          ok++; SENT[t._id || t.id] = { at: new Date().toISOString(), tags: h.tags, on: tg.type };
+          try { localStorage.setItem('readerShell.handoffs', JSON.stringify(SENT)); } catch (e) {}
+        }, function (e) { fails.push(t.task_id + ' (' + (e && (e.status || e.message) || 'error') + ')'); });
+      });
+    }, Promise.resolve()).then(function () {
+      S.busy = false;
+      flash(fails.length ? (ok ? ok + ' sent; ' : '') + 'couldn\u2019t send ' + fails.join(', ') + '. See diagnostics.' : (ok === 1 ? list[0].task_id + ' sent to the next phase' : ok + ' reads sent to the next phase'));
+    });
   }
   function isMine(t) { var a = t.assignee; return a && a.type === 'user' && S.user && a.id === S.user._id; }
   // Claimable = in a pool, or unassigned. The reader run on r6nvg8 showed readers receive unassigned tasks with no pool.
@@ -442,8 +490,17 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       return '<button class="card" data-focus="' + k + '" aria-pressed="' + (S.focus === k) + '"' + (n ? '' : ' disabled') + '><b>' + n + '</b>' + esc(FOCUS[k].label) + '<span>' + esc(FOCUS[k].hint) + '</span></button>';
     }).join('') + '</div>';
     h += '<div class="tabs" role="tablist">' + [['mine', 'Assigned to me', c.mine.length], ['pool', 'Available to claim', c.pool.length], ['done', 'Completed', c.done.length]].map(function (x) {
-      return '<button class="tab" role="tab" data-tab="' + x[0] + '" aria-selected="' + (S.tab === x[0]) + '">' + x[1] + ' <span class="muted">' + x[2] + '</span></button>';
+      var waiting = x[0] === 'done' ? c.done.filter(needsHandoff).length : 0;
+      return '<button class="tab" role="tab" data-tab="' + x[0] + '" aria-selected="' + (S.tab === x[0]) + '">' + x[1] + ' <span class="muted">' + x[2] + '</span>' + (waiting ? ' <span class="pill" style="background:rgba(240,179,94,.16);color:var(--warn)">' + waiting + ' to send</span>' : '') + '</button>';
     }).join('') + '</div>';
+    if (S.tab === 'done') {
+      var wait = c.done.filter(needsHandoff);
+      if (wait.length) {
+        var hf = handoffFor(wait[0]);
+        h += '<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-color:rgba(240,179,94,.45)"><span style="flex:1;min-width:240px"><b>' + wait.length + ' completed read' + (wait.length > 1 ? 's' : '') + ' still need' + (wait.length > 1 ? '' : 's') + ' to be sent on.</b> Sending tags each read\u2019s data so the next phase can start.' + (hf && hf.demo ? ' <span class="muted">(Demo tag <code>' + esc(hf.tags.join(', ')) + '</code>; set the real one in this app\u2019s Application options.)</span>' : '') + '</span>' +
+          '<button class="btn primary" data-sendall="1"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Sending\u2026' : 'Send all ' + wait.length) + '</button></div>';
+      }
+    }
     var readsAvail = {}; c.base.forEach(function (t) { readsAvail[readKey(t)] = 1; });
     function opt(v, l, cur) { return '<option value="' + esc(v) + '"' + (cur === v ? ' selected' : '') + '>' + esc(l) + '</option>'; }
     h += '<div class="bar" style="align-items:flex-end">' +
@@ -472,6 +529,8 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       var act = '';
       if (S.tab === 'pool') act = '<button class="btn" data-claim="' + i + '"' + (S.canWrite ? '' : ' disabled') + '>Claim</button>';
       else if (S.tab === 'mine') act = viewerUrl(t) ? '<button class="btn primary" data-open="' + i + '">' + (t.status === 'in_progress' ? 'Resume' : 'Start') + '</button>' : '<span class="muted">No viewer link</span>';
+      else if (needsHandoff(t)) act = '<button class="btn primary" data-send="' + i + '"' + (S.busy ? ' disabled' : '') + '>' + esc(handoffFor(t).label) + '</button>';
+      else if (sentAt(t)) act = '<span class="muted" title="Tagged ' + esc(sentAt(t).tags.join(', ')) + '">Sent \u2713</span>';
       else act = '<span class="muted">Locked</span>';
       var where = S.tab === 'pool' ? (t.assignee ? '' : ' <span class="pill" title="No assignee and no staffing pool">Unassigned</span>') : '';
       h += '<tr><td><button class="idbtn" data-sel="' + esc(t._id || t.id) + '" aria-label="Details for ' + esc(t.task_id) + '">' + esc(t.task_id) + '</button>' + where + '<span class="sub">Created ' + esc(fmt(t.created)) + '</span></td><td>' + esc(t.protocol_label) + (t.protocol_version ? ' <span class="muted">v' + esc(t.protocol_version) + '</span>' : '') + (multiProj ? '<span class="sub">' + esc(projectLabel(projectOf(t))) + '</span>' : '') + '</td><td>' + (t.read_number ? 'Read ' + esc(t.read_number) : '—') +
@@ -510,8 +569,18 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       '<div><span>Signature</span>' + (p ? (p.esignature_config && p.esignature_config.required ? 'E-signature on submit' : 'No e-signature') : (Array.isArray(S.protocols) ? '\u2014' : 'Loading\u2026')) + '</div></div>';
     h += '<div style="display:flex;flex-direction:column;gap:8px"><b style="font-weight:600">History</b><ul class="tl">' + steps.join('') + '</ul></div>';
     h += '<div style="display:flex;flex-direction:column;gap:8px">' + act + (why ? '<span class="muted" style="font-size:13px">' + esc(why) + '</span>' : '') + '</div>';
+    if (mine && st === 'completed') {
+      var hf2 = handoffFor(t), tg2 = targetOf(t), auto = p && p.completion_tags && p.completion_tags.length;
+      h += '<div class="box" style="gap:10px"><b style="font-weight:600">Next step</b>';
+      if (auto) h += '<span class="muted" style="font-size:13px">This protocol tags the data automatically on submit (<code>' + esc(p.completion_tags.join(', ')) + '</code>).</span>';
+      if (!hf2) h += '<span class="muted" style="font-size:13px">No hand-off is set up for this protocol.</span>';
+      else if (!tg2) h += '<span class="muted" style="font-size:13px">Can\u2019t tell which object this task is on, so it can\u2019t be sent from here.</span>';
+      else if (sentAt(t)) h += '<span>Sent \u2713 <span class="muted">\u00b7 tagged the task\u2019s ' + esc(sentAt(t).on) + ' <code>' + esc(sentAt(t).tags.join(', ')) + '</code> \u00b7 ' + esc(when(sentAt(t).at)) + '</span></span>';
+      else h += '<span class="muted" style="font-size:13px">Tags this task\u2019s ' + esc(tg2.type) + ' <code>' + esc(hf2.tags.join(', ')) + '</code> so the next phase can start.' + (hf2.demo ? ' Demo tag; an admin sets the real one in Application options.' : '') + '</span><button class="btn primary" data-sendsel="1"' + (S.busy ? ' disabled' : '') + '>' + esc(hf2.label) + '</button>';
+      h += '</div>';
+    }
     h += '<div style="display:flex;gap:16px;flex-wrap:wrap"><button class="idbtn" style="font-family:inherit" data-about="1">About this protocol</button><button class="idbtn" style="font-family:inherit" data-report="1">Report a problem with this task</button></div>';
-    h += '<p class="hidden-note">Not shown, by design: the project, subject, session and file names, scan dates, who created the task, and other readers\u2019 tasks or answers. The task was loaded with blinded fields only.</p></aside>';
+    h += '<p class="hidden-note">Not shown, by design: subject, session and file names, scan dates, who created the task, and other readers\u2019 tasks or answers. The task was loaded with blinded fields only.</p></aside>';
     return h;
   }
 
@@ -605,6 +674,9 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     all('[data-proto]', function (b) { b.onclick = function () { S.fProto = b.getAttribute('data-proto'); render(); }; });
     all('[data-sort]', function (b) { b.onclick = function () { var k = b.getAttribute('data-sort'); if (S.sortMode === 'column' && S.sortKey === k) S.sortDir = S.sortDir === 'asc' ? 'desc' : 'asc'; else { S.sortMode = 'column'; S.sortKey = k; S.sortDir = 'asc'; } render(); }; });
     var rs = app.querySelector('[data-reset]'); if (rs) rs.onclick = function () { S.q = ''; S.fRead = 'all'; S.fPrio = 'all'; S.fProto = 'all'; S.sortMode = 'queue'; S.sortKey = null; render(); };
+    all('[data-send]', function (b) { b.onclick = function () { handoff([list[+b.getAttribute('data-send')]]); }; });
+    var sa = app.querySelector('[data-sendall]'); if (sa) sa.onclick = function () { handoff(S.tasks.filter(function (t) { return S.fProject === 'all' || projectOf(t) === S.fProject; })); };
+    var ss = app.querySelector('[data-sendsel]'); if (ss) ss.onclick = function () { handoff([selTask()]); };
     var c = app.querySelector('[data-clear]'); if (c) c.onclick = function () { S.focus = null; render(); };
     var r = app.querySelector('[data-reload]'); if (r) r.onclick = function () { load(); };
     var ht = document.getElementById('htask'); if (ht) ht.onchange = function () { S.hTask = ht.value; render(); };
