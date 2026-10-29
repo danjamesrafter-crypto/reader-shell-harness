@@ -114,6 +114,15 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
 .work b{color:#fff;font-weight:600;font-size:13px}
 .work .bar2{width:70px;height:6px;border-radius:99px;background:#1E2F4A;overflow:hidden}
 .work .bar2 i{display:block;height:100%;background:var(--ok)}
+
+.choice{display:flex;gap:10px;flex-wrap:wrap}
+.opt{flex:1 1 180px;display:flex;gap:10px;align-items:flex-start;text-align:left;padding:12px 14px;border-radius:12px;border:1px solid var(--line2);background:#0B1525;color:var(--fg)}
+.opt i{width:16px;height:16px;border-radius:99px;border:2px solid #5A6B86;flex:none;margin-top:2px}
+.opt span{display:flex;flex-direction:column;gap:2px}.opt small{color:var(--mute);font-size:12px}
+.opt[aria-checked="true"]{border-color:var(--ok);background:rgba(127,224,192,.08)}
+.opt[aria-checked="true"] i{border-color:var(--ok);background:radial-gradient(circle,var(--ok) 45%,transparent 50%)}
+.opt.hold[aria-checked="true"]{border-color:var(--warn);background:rgba(240,179,94,.08)}
+.opt.hold[aria-checked="true"] i{border-color:var(--warn);background:radial-gradient(circle,var(--warn) 45%,transparent 50%)}
 </style>
 </head>
 <body>
@@ -326,7 +335,22 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       render();
     }, function (e) { S.groupTags[gid] = { error: e && (e.status || e.message) || 'error' }; render(); });
   }
-  function tagsFor(t) { var g = groupOf(t); loadGroupTags(g); return S.groupTags[g]; }
+  // Which of the group's tags a reader may choose. Default for WRC/Sandbox: the two routing outcomes.
+  // Override in Application options: {"handoff": {"*": {"choices": ["Move_to_next_step", "Hold_for_review"]}}}.
+  // Only tags that exist on the group are offered; if none of the choices exist, all group tags are shown.
+  var DEFAULT_CHOICES = ['Move_to_next_step', 'Hold_for_review'];
+  function choicesFor(t) {
+    var h = (S.params && S.params.handoff) || {}, c = h[t.protocol_id] || h[t.protocol_label] || h['*'] || {};
+    return c.choices || DEFAULT_CHOICES;
+  }
+  function tagsFor(t) {
+    var g = groupOf(t); loadGroupTags(g); var all = S.groupTags[g];
+    if (!Array.isArray(all)) return all;
+    var ch = choicesFor(t), keep = all.filter(function (x) { return ch.indexOf(x) > -1; });
+    keep.sort(function (a, b) { return ch.indexOf(a) - ch.indexOf(b); });
+    return keep.length ? keep : all;
+  }
+  function tagLabel(x) { return String(x).replace(/_/g, ' ').replace(/^./, function (c) { return c.toUpperCase(); }).replace(/\s+(\w)/g, function (m, c) { return ' ' + c.toLowerCase(); }); }
   function chosenTag(t) {
     var key = t._id || t.id, list = tagsFor(t);
     if (S.pick && S.pick[key]) return S.pick[key];
@@ -365,7 +389,8 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       });
     }, Promise.resolve()).then(function () {
       S.busy = false;
-      flash(fails.length ? (ok ? ok + ' sent; ' : '') + 'couldn\u2019t send ' + fails.join(', ') + '. See diagnostics.' : (ok === 1 ? list[0].task_id + ' sent on' : ok + ' reads sent on'));
+      if (!fails.length && list.length === 1 && S.sel) { var nx = S.tasks.filter(function (x) { return needsHandoff(x) && (S.fProject === 'all' || projectOf(x) === S.fProject); })[0]; S.sel = nx ? (nx._id || nx.id) : null; }
+      flash(fails.length ? (ok ? ok + ' sent; ' : '') + 'couldn\u2019t send ' + fails.join(', ') + '. See diagnostics.' : (ok === 1 ? list[0].task_id + ' \u2192 ' + tagLabel(SENT[list[0]._id || list[0].id].tags[0]) : ok + ' reads sent on'));
     });
   }
   // Tag chooser (single choice). Used in the task panel and the "Send all" banner.
@@ -373,9 +398,14 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     if (list === 'loading' || list === undefined) return '<span class="muted" style="font-size:13px">Loading this study\u2019s tags\u2026</span>';
     if (!Array.isArray(list)) return '<span class="muted" style="font-size:13px">Couldn\u2019t load this study\u2019s tags (' + esc(list.error) + ').</span>';
     if (!list.length) return '<span class="muted" style="font-size:13px">No tags are defined for this study\u2019s group yet. An admin adds them on the group.</span>';
-    if (list.length > 8) return '<select class="fld" ' + attr + '="1"><option value="">Choose a tag\u2026</option>' + list.map(function (x) { return '<option' + (x === cur ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('') + '</select>';
-    return '<div class="chips" role="radiogroup" aria-label="Tag to apply">' + list.map(function (x) { return '<button class="chipb" role="radio" ' + attr + '="' + esc(x) + '" aria-checked="' + (x === cur) + '" aria-pressed="' + (x === cur) + '">' + esc(x) + '</button>'; }).join('') + '</div>';
+    if (list.length > 8) return '<select class="fld" ' + attr + '="1"><option value="">Choose a tag\u2026</option>' + list.map(function (x) { return '<option value="' + esc(x) + '"' + (x === cur ? ' selected' : '') + '>' + esc(tagLabel(x)) + '</option>'; }).join('') + '</select>';
+    var hint = { Move_to_next_step: 'Data goes on to the next phase', Hold_for_review: 'Data waits for the study team' };
+    return '<div class="choice" role="radiogroup" aria-label="Outcome">' + list.map(function (x) {
+      var on = x === cur;
+      return '<button class="opt' + (/hold/i.test(x) ? ' hold' : '') + '" role="radio" ' + attr + '="' + esc(x) + '" aria-checked="' + on + '"><i aria-hidden="true"></i><span><b>' + esc(tagLabel(x)) + '</b>' + (hint[x] ? '<small>' + esc(hint[x]) + '</small>' : '<small><code>' + esc(x) + '</code></small>') + '</span></button>';
+    }).join('') + '</div>';
   }
+
 
   function isMine(t) { var a = t.assignee; return a && a.type === 'user' && S.user && a.id === S.user._id; }
   // Claimable = in a pool, or unassigned. The reader run on r6nvg8 showed readers receive unassigned tasks with no pool.
@@ -524,10 +554,9 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     if (S.tab === 'done') {
       var wait = c.done.filter(needsHandoff);
       if (wait.length) {
-        var gl = tagsFor(wait[0]), bt = S.bulkTag || chosenTag(wait[0]);
-        h += '<div class="banner" style="display:flex;flex-direction:column;gap:10px;border-color:rgba(240,179,94,.45)"><span><b>' + wait.length + ' completed read' + (wait.length > 1 ? 's' : '') + ' still need' + (wait.length > 1 ? '' : 's') + ' to be sent on.</b> Choose the tag that starts the next phase; it\u2019s applied to each read\u2019s data.</span>' +
-          '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">' + tagPicker(gl, bt, 'data-bulktag') +
-          '<button class="btn primary" data-sendall="1"' + (S.busy || !bt ? ' disabled' : '') + '>' + (S.busy ? 'Sending\u2026' : 'Send all ' + wait.length + (bt ? ' as ' + esc(bt) : '')) + '</button></div></div>';
+        // The outcome is a per-read judgment, so there's no "apply to all": the banner walks the reader through them.
+        h += '<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-color:rgba(240,179,94,.45)"><span style="flex:1;min-width:240px"><b>' + wait.length + ' completed read' + (wait.length > 1 ? 's need' : ' needs') + ' an outcome.</b> Choose Move to next step or Hold for review for each one.</span>' +
+          '<button class="btn primary" data-sendopen="' + esc(wait[0]._id || wait[0].id) + '">Start with ' + esc(wait[0].task_id) + '</button></div>';
       }
     }
     var readsAvail = {}; c.base.forEach(function (t) { readsAvail[readKey(t)] = 1; });
@@ -558,8 +587,8 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       var act = '';
       if (S.tab === 'pool') act = '<button class="btn" data-claim="' + i + '"' + (S.canWrite ? '' : ' disabled') + '>Claim</button>';
       else if (S.tab === 'mine') act = viewerUrl(t) ? '<button class="btn primary" data-open="' + i + '">' + (t.status === 'in_progress' ? 'Resume' : 'Start') + '</button>' : '<span class="muted">No viewer link</span>';
-      else if (needsHandoff(t)) act = '<button class="btn primary" data-sendopen="' + esc(t._id || t.id) + '">' + esc(handoffCfg(t).label) + '\u2026</button>';
-      else if (sentAt(t)) act = '<span class="muted" title="Tagged ' + esc(sentAt(t).tags.join(', ')) + '">Sent \u2713</span>';
+      else if (needsHandoff(t)) act = '<button class="btn primary" data-sendopen="' + esc(t._id || t.id) + '">Choose outcome\u2026</button>';
+      else if (sentAt(t)) act = '<span class="muted" title="Tagged ' + esc(sentAt(t).tags.join(', ')) + '">' + esc(tagLabel(sentAt(t).tags[0])) + ' \u2713</span>';
       else act = '<span class="muted">Locked</span>';
       var where = S.tab === 'pool' ? (t.assignee ? '' : ' <span class="pill" title="No assignee and no staffing pool">Unassigned</span>') : '';
       h += '<tr><td><button class="idbtn" data-sel="' + esc(t._id || t.id) + '" aria-label="Details for ' + esc(t.task_id) + '">' + esc(t.task_id) + '</button>' + where + '<span class="sub">Created ' + esc(fmt(t.created)) + '</span></td><td>' + esc(t.protocol_label) + (t.protocol_version ? ' <span class="muted">v' + esc(t.protocol_version) + '</span>' : '') + (multiProj ? '<span class="sub">' + esc(projectLabel(projectOf(t))) + '</span>' : '') + '</td><td>' + (t.read_number ? 'Read ' + esc(t.read_number) : '—') +
@@ -604,8 +633,8 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       if (auto) h += '<span class="muted" style="font-size:13px">This protocol tags the data automatically on submit (<code>' + esc(p.completion_tags.join(', ')) + '</code>).</span>';
       if (!tg2) h += '<span class="muted" style="font-size:13px">Can\u2019t tell which object this task is on, so it can\u2019t be sent from here.</span>';
       else if (sentAt(t)) h += '<span>Sent \u2713 <span class="muted">\u00b7 tagged the task\u2019s ' + esc(sentAt(t).on) + ' <code>' + esc(sentAt(t).tags.join(', ')) + '</code> \u00b7 ' + esc(when(sentAt(t).at)) + '</span></span>';
-      else h += '<span class="muted" style="font-size:13px">Choose the tag that starts the next phase. It\u2019s applied to this task\u2019s ' + esc(tg2.type) + '.</span>' + tagPicker(tagsFor(t), cur, 'data-picktag') +
-        '<button class="btn primary" data-sendsel="1"' + (S.busy || !cur ? ' disabled' : '') + '>' + esc(cfg.label) + (cur ? ' \u00b7 ' + esc(cur) : '') + '</button>';
+      else h += '<span class="muted" style="font-size:13px">What happens to this read\u2019s data next? The choice is applied as a tag to this task\u2019s ' + esc(tg2.type) + '.</span>' + tagPicker(tagsFor(t), cur, 'data-picktag') +
+        '<button class="btn primary" data-sendsel="1"' + (S.busy || !cur ? ' disabled' : '') + '>' + (cur ? 'Confirm \u00b7 ' + esc(tagLabel(cur)) : 'Choose an outcome') + '</button>';
       h += '</div>';
     }
     h += '<div style="display:flex;gap:16px;flex-wrap:wrap"><button class="idbtn" style="font-family:inherit" data-about="1">About this protocol</button><button class="idbtn" style="font-family:inherit" data-report="1">Report a problem with this task</button></div>';
