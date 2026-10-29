@@ -13,7 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@500&family=Noto+Serif:wght@400&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#070D18;--panel:#0E1A2B;--line:#1E2F4A;--line2:#27395A;--fg:#E7EAF0;--mute:#A3ACBA;--dim:#7F8897;--accent:#2269E9;--warn:#F0B35E;--bad:#FF9B8A;--ok:#7FE0C0}
+:root{color-scheme:dark;--bg:#070D18;--panel:#0E1A2B;--line:#1E2F4A;--line2:#27395A;--fg:#E7EAF0;--mute:#A3ACBA;--dim:#7F8897;--accent:#2269E9;--warn:#F0B35E;--bad:#FF9B8A;--ok:#7FE0C0}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 "Inter Tight",system-ui,sans-serif}
 button{font:inherit;cursor:pointer}
@@ -103,6 +103,17 @@ select.fld{padding-right:28px}
 .sorth:hover{color:var(--fg)}
 .sorth[data-on="1"]{color:var(--fg)}
 .sub{display:block;font-size:11px;color:var(--dim);margin-top:2px}
+
+html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:#070D18}
+::-webkit-scrollbar-thumb{background:#27395A;border-radius:10px;border:2px solid #070D18}
+::-webkit-scrollbar-thumb:hover{background:#3A5280}
+::-webkit-scrollbar-corner{background:#070D18}
+.work{display:inline-flex;align-items:center;gap:10px;padding:6px 12px;border-radius:999px;background:#13233A;border:1px solid #27395A;font-size:12px;color:#C9D0DA}
+.work b{color:#fff;font-weight:600;font-size:13px}
+.work .bar2{width:70px;height:6px;border-radius:99px;background:#1E2F4A;overflow:hidden}
+.work .bar2 i{display:block;height:100%;background:var(--ok)}
 </style>
 </head>
 <body>
@@ -280,7 +291,15 @@ select.fld{padding-right:28px}
     } else if (ps.length === 1) {
       sw = '<span class="chip">Project \u00b7 ' + esc(projectLabel(ps[0].id)) + '</span>';
     }
-    return '<div class="top"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + chip + sw + '</div><span class="chip">' + ICON.lock.replace('<svg ', '<svg style="width:14px;height:14px" ') + ' Blinded reading environment</span></div>';
+    // "How much work do I still have to do": open reads assigned to me (to do + in progress) in the current project scope
+    var left = c.mine.length, inprog = c.mine.filter(function (t) { return t.status === 'in_progress'; }).length, doneN = c.done.length, total = left + doneN;
+    var pct = total ? Math.round(doneN / total * 100) : 0;
+    var work = '<span class="work" title="Assigned to you and not yet submitted' + (S.fProject === 'all' ? ', across all projects' : '') + '"><b>' + left + ' read' + (left === 1 ? '' : 's') + ' left</b>' +
+      '<span>' + (left - inprog) + ' to do \u00b7 ' + inprog + ' in progress</span>' +
+      '<span class="bar2" role="img" aria-label="' + doneN + ' of ' + total + ' done"><i style="width:' + pct + '%"></i></span><span>' + doneN + ' of ' + total + ' done</span></span>';
+    var single = c.projs.length <= 1;
+    var row2 = single ? '' : '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:-6px">' + sw + '</div>';
+    return '<div class="top"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + chip + (single ? sw : '') + work + '</div><span class="chip">' + ICON.lock.replace('<svg ', '<svg style="width:14px;height:14px" ') + ' Blinded reading environment</span></div>' + row2;
   }
   function isMine(t) { var a = t.assignee; return a && a.type === 'user' && S.user && a.id === S.user._id; }
   // Claimable = in a pool, or unassigned. The reader run on r6nvg8 showed readers receive unassigned tasks with no pool.
