@@ -410,7 +410,16 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
   function isMine(t) { var a = t.assignee; return a && a.type === 'user' && S.user && a.id === S.user._id; }
   // Claimable = in a pool, or unassigned. The reader run on r6nvg8 showed readers receive unassigned tasks with no pool.
   function isPool(t) { var a = t.assignee; return (a && a.type === 'staffing_pool') || !a; }
-  function open(t) { return t.status !== 'completed' && t.status !== 'cancelled'; }
+  function open(t) { return t.status !== 'completed' && t.status !== 'cancelled' && t.status !== 'canceled'; }
+  // Adjudication reads stay "blocked" until the primary reads are done; they can't be claimed or started yet.
+  function blocked(t) { return t.status === 'blocked'; }
+  // Reads of the same case share the task-ID stem: R-<batch>-<item>-<read>. A reader who holds or did one
+  // read of a case must not take another read of it, above all its adjudication (independence of reads).
+  function caseStem(t) { var m = /^(R-\d+-\d+)-\d+$/.exec(t.task_id || ''); return m ? m[1] : null; }
+  function ownReadOfCase(t) {
+    var st = caseStem(t); if (!st) return null;
+    return S.tasks.filter(function (x) { return x !== t && caseStem(x) === st && isMine(x); })[0] || null;
+  }
 
   var FOCUS = {
     overdue: { label: 'Overdue', hint: 'Past due date', test: function (t) { var d = days(t.due_date); return d != null && d < 0; } },
@@ -489,7 +498,7 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     if (S.fProject !== 'all' && !projs.some(function (p) { return p.id === S.fProject; })) S.fProject = 'all';
     var scoped = S.fProject === 'all' ? S.tasks : S.tasks.filter(function (t) { return projectOf(t) === S.fProject; });
     var mine = scoped.filter(function (t) { return isMine(t) && open(t); });
-    var pool = scoped.filter(function (t) { return isPool(t) && open(t); });
+    var pool = scoped.filter(function (t) { return isPool(t) && open(t) && !blocked(t) && !ownReadOfCase(t); });
     var done = scoped.filter(function (t) { return isMine(t) && t.status === 'completed'; });
     var ctx = { mine: mine, pool: pool, done: done, list: [], projs: projs };
     var body = S.screen === 'reads' ? reads(ctx) : S.screen === 'queries' ? queries() : S.screen === 'activity' ? activity(ctx) : S.screen === 'resources' ? resources(ctx) : help(ctx);
@@ -586,6 +595,7 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       var d = days(t.due_date), due = t.due_date ? (d < 0 ? '<span style="color:var(--bad)">Overdue · ' + fmt(t.due_date) + '</span>' : d === 0 ? '<span style="color:var(--warn)">Due today</span>' : d === 1 ? '<span style="color:var(--warn)">Due tomorrow</span>' : 'Due ' + fmt(t.due_date)) : '<span class="muted">No due date</span>';
       var act = '';
       if (S.tab === 'pool') act = '<button class="btn" data-claim="' + i + '"' + (S.canWrite ? '' : ' disabled') + '>Claim</button>';
+      else if (S.tab === 'mine' && blocked(t)) act = '<span class="muted" title="Opens when the other reads of this case are submitted">Waiting on other reads</span>';
       else if (S.tab === 'mine') act = viewerUrl(t) ? '<button class="btn primary" data-open="' + i + '">' + (t.status === 'in_progress' ? 'Resume' : 'Start') + '</button>' : '<span class="muted">No viewer link</span>';
       else if (needsHandoff(t)) act = '<button class="btn primary" data-sendopen="' + esc(t._id || t.id) + '">Choose outcome\u2026</button>';
       else if (sentAt(t)) act = '<span class="muted" title="Tagged ' + esc(sentAt(t).tags.join(', ')) + '">' + esc(tagLabel(sentAt(t).tags[0])) + ' \u2713</span>';
@@ -614,7 +624,10 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     if (!steps.length && t.created) steps.push('<li><i></i><span>Created <span class="muted">\u00b7 ' + esc(when(t.created)) + '</span></span></li>');
     var mins = minutesOf(t);
     var act, why = '';
-    if (!mine && open(t)) { act = '<button class="btn primary" data-claimsel="1">Claim this task</button>'; why = t.assignee ? 'In a staffing pool you belong to.' : 'Unassigned: no reader and no staffing pool.'; }
+    var own = !mine ? ownReadOfCase(t) : null;
+    if (!mine && own) { act = '<span class="chip">Not available to you</span>'; why = 'You hold ' + own.task_id + ', another read of this case. Reads of one case must be independent, so a different reader takes this one.'; }
+    else if (blocked(t)) { act = '<span class="chip">Waiting on other reads</span>'; why = 'This read opens when the other reads of this case are submitted.'; }
+    else if (!mine && open(t)) { act = '<button class="btn primary" data-claimsel="1">Claim this task</button>'; why = t.assignee ? 'In a staffing pool you belong to.' : 'Unassigned: no reader and no staffing pool.'; }
     else if (st === 'completed') { act = '<span class="chip">' + ICON.lock.replace('<svg ', '<svg style="width:14px;height:14px" ') + ' Submitted and locked</span>'; why = 'Your answers are signed. Contact the study team if something is wrong.'; }
     else if (viewerUrl(t)) act = '<button class="btn primary" data-opensel="1">' + (st === 'in_progress' ? 'Resume in viewer' : 'Start read in viewer') + ' ' + ICON.external.replace('<svg ', '<svg style="width:14px;height:14px;vertical-align:-2px" ') + '</button>';
     else act = '<span class="muted">No viewer link</span>';
