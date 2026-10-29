@@ -305,14 +305,33 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
   // ---- Hand-off after a read (WRC workflow) ---------------------------------------------------------
   // After submitting, the reader applies a tag to the object the task is on (session, acquisition or file).
   // A gear rule watching for that tag moves the data to the next phase, so the viewer needs no extra logic.
-  // Which tag(s) a protocol uses is set by an admin in this app's "Application options" JSON, e.g.
-  //   {"handoff": {"Single": {"tags": ["wrc-read-complete"], "label": "Send to grading QC"}, "*": {...}}}
-  // keyed by protocol label, protocol id or "*". Readers never type tags.
-  var DEMO_HANDOFF = { tags: ['read-complete'], label: 'Send to next phase', demo: true };
-  function handoffFor(t) {
-    var h = (S.params && S.params.handoff) || null;
-    if (!h) return DEMO_HANDOFF;
-    return h[t.protocol_id] || h[t.protocol_label] || h['*'] || null;
+  // The reader picks the tag from the group's own tag list (tags are scoped to the group), read with
+  // GET /api/groups/{group}. Application options can still preselect a default per protocol, e.g.
+  //   {"handoff": {"Single": {"tag": "wrc-read-complete", "label": "Send to grading QC"}, "*": {...}}}
+  // Assumes the platform grants readers permission to tag their own task's container (RS-HO3).
+  function handoffCfg(t) {
+    var h = (S.params && S.params.handoff) || {};
+    var c = h[t.protocol_id] || h[t.protocol_label] || h['*'] || {};
+    return { tag: c.tag || (c.tags && c.tags[0]) || null, label: c.label || 'Send to next phase' };
+  }
+  function groupOf(t) { return t.parents && t.parents.group; }
+  S.groupTags = {};
+  function loadGroupTags(gid) {
+    if (!gid || S.groupTags[gid]) return;
+    S.groupTags[gid] = 'loading';
+    api('GET', '/api/groups/' + encodeURIComponent(gid)).then(function (g) {
+      var tags = (g && g.tags) || [];
+      S.groupTags[gid] = tags.map(function (x) { return typeof x === 'string' ? x : (x && (x.value || x.label || x.name)); }).filter(Boolean).sort();
+      note('Group tags: ' + S.groupTags[gid].length + ' available.');
+      render();
+    }, function (e) { S.groupTags[gid] = { error: e && (e.status || e.message) || 'error' }; render(); });
+  }
+  function tagsFor(t) { var g = groupOf(t); loadGroupTags(g); return S.groupTags[g]; }
+  function chosenTag(t) {
+    var key = t._id || t.id, list = tagsFor(t);
+    if (S.pick && S.pick[key]) return S.pick[key];
+    var d = handoffCfg(t).tag;
+    return Array.isArray(list) && d && list.indexOf(d) > -1 ? d : null;
   }
   // The object the task points at, from IDs only (no labels): parent_ref when the server returns it,
   // otherwise the most specific of parents.file > acquisition > session.
@@ -327,28 +346,37 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
   var SENT = {};
   try { SENT = JSON.parse(localStorage.getItem('readerShell.handoffs') || '{}'); } catch (e) {}
   function sentAt(t) { return SENT[t._id || t.id]; }
-  function needsHandoff(t) { return isMine(t) && t.status === 'completed' && !!handoffFor(t) && !!targetOf(t) && !sentAt(t); }
-  function handoff(tasks) {
-    var list = tasks.filter(needsHandoff);
-    if (!list.length) return;
+  function needsHandoff(t) { return isMine(t) && t.status === 'completed' && !!targetOf(t) && !sentAt(t); }
+  function handoff(tasks, tagFor) {
+    var list = tasks.filter(needsHandoff).filter(function (t) { return tagFor(t); });
+    if (!list.length) { flash('Pick a tag first.'); return; }
     S.busy = true; render();
     var ok = 0, fails = [];
     list.reduce(function (p, t) {
       return p.then(function () {
-        var h = handoffFor(t), tg = targetOf(t);
+        var tag = tagFor(t), tg = targetOf(t);
         var call = tg.type === 'file'
-          ? api('PATCH', '/api/files/' + tg.id + '/tags', undefined, h.tags)
-          : api('PATCH', '/api/containers/' + tg.id + '/tags', undefined, h.tags);
+          ? api('PATCH', '/api/files/' + tg.id + '/tags', undefined, [tag])
+          : api('PATCH', '/api/containers/' + tg.id + '/tags', undefined, [tag]);
         return call.then(function () {
-          ok++; SENT[t._id || t.id] = { at: new Date().toISOString(), tags: h.tags, on: tg.type };
+          ok++; SENT[t._id || t.id] = { at: new Date().toISOString(), tags: [tag], on: tg.type };
           try { localStorage.setItem('readerShell.handoffs', JSON.stringify(SENT)); } catch (e) {}
         }, function (e) { fails.push(t.task_id + ' (' + (e && (e.status || e.message) || 'error') + ')'); });
       });
     }, Promise.resolve()).then(function () {
       S.busy = false;
-      flash(fails.length ? (ok ? ok + ' sent; ' : '') + 'couldn\u2019t send ' + fails.join(', ') + '. See diagnostics.' : (ok === 1 ? list[0].task_id + ' sent to the next phase' : ok + ' reads sent to the next phase'));
+      flash(fails.length ? (ok ? ok + ' sent; ' : '') + 'couldn\u2019t send ' + fails.join(', ') + '. See diagnostics.' : (ok === 1 ? list[0].task_id + ' sent on' : ok + ' reads sent on'));
     });
   }
+  // Tag chooser (single choice). Used in the task panel and the "Send all" banner.
+  function tagPicker(list, cur, attr) {
+    if (list === 'loading' || list === undefined) return '<span class="muted" style="font-size:13px">Loading this study\u2019s tags\u2026</span>';
+    if (!Array.isArray(list)) return '<span class="muted" style="font-size:13px">Couldn\u2019t load this study\u2019s tags (' + esc(list.error) + ').</span>';
+    if (!list.length) return '<span class="muted" style="font-size:13px">No tags are defined for this study\u2019s group yet. An admin adds them on the group.</span>';
+    if (list.length > 8) return '<select class="fld" ' + attr + '="1"><option value="">Choose a tag\u2026</option>' + list.map(function (x) { return '<option' + (x === cur ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('') + '</select>';
+    return '<div class="chips" role="radiogroup" aria-label="Tag to apply">' + list.map(function (x) { return '<button class="chipb" role="radio" ' + attr + '="' + esc(x) + '" aria-checked="' + (x === cur) + '" aria-pressed="' + (x === cur) + '">' + esc(x) + '</button>'; }).join('') + '</div>';
+  }
+
   function isMine(t) { var a = t.assignee; return a && a.type === 'user' && S.user && a.id === S.user._id; }
   // Claimable = in a pool, or unassigned. The reader run on r6nvg8 showed readers receive unassigned tasks with no pool.
   function isPool(t) { var a = t.assignee; return (a && a.type === 'staffing_pool') || !a; }
@@ -496,9 +524,10 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     if (S.tab === 'done') {
       var wait = c.done.filter(needsHandoff);
       if (wait.length) {
-        var hf = handoffFor(wait[0]);
-        h += '<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-color:rgba(240,179,94,.45)"><span style="flex:1;min-width:240px"><b>' + wait.length + ' completed read' + (wait.length > 1 ? 's' : '') + ' still need' + (wait.length > 1 ? '' : 's') + ' to be sent on.</b> Sending tags each read\u2019s data so the next phase can start.' + (hf && hf.demo ? ' <span class="muted">(Demo tag <code>' + esc(hf.tags.join(', ')) + '</code>; set the real one in this app\u2019s Application options.)</span>' : '') + '</span>' +
-          '<button class="btn primary" data-sendall="1"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Sending\u2026' : 'Send all ' + wait.length) + '</button></div>';
+        var gl = tagsFor(wait[0]), bt = S.bulkTag || chosenTag(wait[0]);
+        h += '<div class="banner" style="display:flex;flex-direction:column;gap:10px;border-color:rgba(240,179,94,.45)"><span><b>' + wait.length + ' completed read' + (wait.length > 1 ? 's' : '') + ' still need' + (wait.length > 1 ? '' : 's') + ' to be sent on.</b> Choose the tag that starts the next phase; it\u2019s applied to each read\u2019s data.</span>' +
+          '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">' + tagPicker(gl, bt, 'data-bulktag') +
+          '<button class="btn primary" data-sendall="1"' + (S.busy || !bt ? ' disabled' : '') + '>' + (S.busy ? 'Sending\u2026' : 'Send all ' + wait.length + (bt ? ' as ' + esc(bt) : '')) + '</button></div></div>';
       }
     }
     var readsAvail = {}; c.base.forEach(function (t) { readsAvail[readKey(t)] = 1; });
@@ -529,7 +558,7 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
       var act = '';
       if (S.tab === 'pool') act = '<button class="btn" data-claim="' + i + '"' + (S.canWrite ? '' : ' disabled') + '>Claim</button>';
       else if (S.tab === 'mine') act = viewerUrl(t) ? '<button class="btn primary" data-open="' + i + '">' + (t.status === 'in_progress' ? 'Resume' : 'Start') + '</button>' : '<span class="muted">No viewer link</span>';
-      else if (needsHandoff(t)) act = '<button class="btn primary" data-send="' + i + '"' + (S.busy ? ' disabled' : '') + '>' + esc(handoffFor(t).label) + '</button>';
+      else if (needsHandoff(t)) act = '<button class="btn primary" data-sendopen="' + esc(t._id || t.id) + '">' + esc(handoffCfg(t).label) + '\u2026</button>';
       else if (sentAt(t)) act = '<span class="muted" title="Tagged ' + esc(sentAt(t).tags.join(', ')) + '">Sent \u2713</span>';
       else act = '<span class="muted">Locked</span>';
       var where = S.tab === 'pool' ? (t.assignee ? '' : ' <span class="pill" title="No assignee and no staffing pool">Unassigned</span>') : '';
@@ -570,13 +599,13 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     h += '<div style="display:flex;flex-direction:column;gap:8px"><b style="font-weight:600">History</b><ul class="tl">' + steps.join('') + '</ul></div>';
     h += '<div style="display:flex;flex-direction:column;gap:8px">' + act + (why ? '<span class="muted" style="font-size:13px">' + esc(why) + '</span>' : '') + '</div>';
     if (mine && st === 'completed') {
-      var hf2 = handoffFor(t), tg2 = targetOf(t), auto = p && p.completion_tags && p.completion_tags.length;
+      var tg2 = targetOf(t), auto = p && p.completion_tags && p.completion_tags.length, cur = chosenTag(t), cfg = handoffCfg(t);
       h += '<div class="box" style="gap:10px"><b style="font-weight:600">Next step</b>';
       if (auto) h += '<span class="muted" style="font-size:13px">This protocol tags the data automatically on submit (<code>' + esc(p.completion_tags.join(', ')) + '</code>).</span>';
-      if (!hf2) h += '<span class="muted" style="font-size:13px">No hand-off is set up for this protocol.</span>';
-      else if (!tg2) h += '<span class="muted" style="font-size:13px">Can\u2019t tell which object this task is on, so it can\u2019t be sent from here.</span>';
+      if (!tg2) h += '<span class="muted" style="font-size:13px">Can\u2019t tell which object this task is on, so it can\u2019t be sent from here.</span>';
       else if (sentAt(t)) h += '<span>Sent \u2713 <span class="muted">\u00b7 tagged the task\u2019s ' + esc(sentAt(t).on) + ' <code>' + esc(sentAt(t).tags.join(', ')) + '</code> \u00b7 ' + esc(when(sentAt(t).at)) + '</span></span>';
-      else h += '<span class="muted" style="font-size:13px">Tags this task\u2019s ' + esc(tg2.type) + ' <code>' + esc(hf2.tags.join(', ')) + '</code> so the next phase can start.' + (hf2.demo ? ' Demo tag; an admin sets the real one in Application options.' : '') + '</span><button class="btn primary" data-sendsel="1"' + (S.busy ? ' disabled' : '') + '>' + esc(hf2.label) + '</button>';
+      else h += '<span class="muted" style="font-size:13px">Choose the tag that starts the next phase. It\u2019s applied to this task\u2019s ' + esc(tg2.type) + '.</span>' + tagPicker(tagsFor(t), cur, 'data-picktag') +
+        '<button class="btn primary" data-sendsel="1"' + (S.busy || !cur ? ' disabled' : '') + '>' + esc(cfg.label) + (cur ? ' \u00b7 ' + esc(cur) : '') + '</button>';
       h += '</div>';
     }
     h += '<div style="display:flex;gap:16px;flex-wrap:wrap"><button class="idbtn" style="font-family:inherit" data-about="1">About this protocol</button><button class="idbtn" style="font-family:inherit" data-report="1">Report a problem with this task</button></div>';
@@ -674,9 +703,11 @@ html{scrollbar-color:#27395A #070D18;scrollbar-width:thin}
     all('[data-proto]', function (b) { b.onclick = function () { S.fProto = b.getAttribute('data-proto'); render(); }; });
     all('[data-sort]', function (b) { b.onclick = function () { var k = b.getAttribute('data-sort'); if (S.sortMode === 'column' && S.sortKey === k) S.sortDir = S.sortDir === 'asc' ? 'desc' : 'asc'; else { S.sortMode = 'column'; S.sortKey = k; S.sortDir = 'asc'; } render(); }; });
     var rs = app.querySelector('[data-reset]'); if (rs) rs.onclick = function () { S.q = ''; S.fRead = 'all'; S.fPrio = 'all'; S.fProto = 'all'; S.sortMode = 'queue'; S.sortKey = null; render(); };
-    all('[data-send]', function (b) { b.onclick = function () { handoff([list[+b.getAttribute('data-send')]]); }; });
-    var sa = app.querySelector('[data-sendall]'); if (sa) sa.onclick = function () { handoff(S.tasks.filter(function (t) { return S.fProject === 'all' || projectOf(t) === S.fProject; })); };
-    var ss = app.querySelector('[data-sendsel]'); if (ss) ss.onclick = function () { handoff([selTask()]); };
+    all('[data-sendopen]', function (b) { b.onclick = function () { S.sel = b.getAttribute('data-sendopen'); render(); }; });
+    all('[data-picktag]', function (b) { (b.tagName === 'SELECT' ? function () { b.onchange = function () { S.pick = S.pick || {}; S.pick[S.sel] = b.value; render(); }; } : function () { b.onclick = function () { S.pick = S.pick || {}; S.pick[S.sel] = b.getAttribute('data-picktag'); render(); }; })(); });
+    all('[data-bulktag]', function (b) { (b.tagName === 'SELECT' ? function () { b.onchange = function () { S.bulkTag = b.value; render(); }; } : function () { b.onclick = function () { S.bulkTag = b.getAttribute('data-bulktag'); render(); }; })(); });
+    var sa = app.querySelector('[data-sendall]'); if (sa) sa.onclick = function () { var w0 = S.tasks.filter(needsHandoff)[0], tag = S.bulkTag || (w0 ? chosenTag(w0) : null); handoff(S.tasks.filter(function (t) { return S.fProject === 'all' || projectOf(t) === S.fProject; }), function (t) { var l = tagsFor(t); return Array.isArray(l) && l.indexOf(tag) > -1 ? tag : null; }); };
+    var ss = app.querySelector('[data-sendsel]'); if (ss) ss.onclick = function () { var t = selTask(); handoff([t], function () { return chosenTag(t); }); };
     var c = app.querySelector('[data-clear]'); if (c) c.onclick = function () { S.focus = null; render(); };
     var r = app.querySelector('[data-reload]'); if (r) r.onclick = function () { load(); };
     var ht = document.getElementById('htask'); if (ht) ht.onchange = function () { S.hTask = ht.value; render(); };
