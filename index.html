@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reader Shell (live harness)</title>
 <!--
-  Reader Shell, live-data harness 0.6.0. Runs as a Flywheel extension app (Viewer type).
+  Reader Shell, live-data harness 0.6.1. Runs as a Flywheel extension app (Viewer type).
   UI: Flywheel Vision Design System (vision-react bundle, dark theme), mounted with React 18.
   All data comes through the Extension SDK's apiRequest proxy, so this page never sees a token.
   Requests ask only for blinded columns: no project, subject, session or file labels, no creator.
@@ -694,12 +694,12 @@ code, .mono { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; 
 .brand .nm span { font-size: var(--text-p4); color: var(--typography-light); }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: auto; }
-.topbar { flex-shrink: 0; position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); min-height: 50px; padding: var(--space-3) var(--space-6); background: var(--card-background); border-bottom: 1px solid var(--separations-base); flex-wrap: wrap; }
+.topbar { flex-shrink: 0; position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); min-height: 50px; padding: var(--space-3) 56px var(--space-3) var(--space-6); background: var(--card-background); border-bottom: 1px solid var(--separations-base); flex-wrap: wrap; }
 .tb-left, .tb-right { display: flex; align-items: center; gap: var(--space-5); flex-wrap: wrap; min-width: 0; }
 .tb-right { gap: var(--space-4); }
 .work { display: inline-flex; align-items: center; gap: var(--space-4); padding: 0 var(--space-5); height: 30px; border: 1px solid var(--separations-border); border-radius: var(--radius-chip); white-space: nowrap; }
 .work-bar { width: 72px; }
-.page { flex-shrink: 0; padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-6); max-width: 1320px; width: 100%; }
+.page { flex-shrink: 0; padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-6); width: 100%; }
 .page.narrow { max-width: 760px; margin: 48px auto; }
 .center { height: 100vh; display: grid; place-items: center; }
 .stack { display: flex; flex-direction: column; gap: var(--space-6); }
@@ -8604,9 +8604,9 @@ __ds_ns.Tree = __ds_scope.Tree;
 </script>
 <script>(function () {
   'use strict';
-  // Reader Shell (live harness) 0.6.0: the view is built from the Flywheel Vision Design System
+  // Reader Shell (live harness) 0.6.1: the view is built from the Flywheel Vision Design System
   // (vision-react bundle, dark theme). Data logic is unchanged from 0.5.x.
-  var VERSION = 'reader-shell-harness/0.6.0';
+  var VERSION = 'reader-shell-harness/0.6.1';
   var V = window.FlywheelVisionDesignSystem_6c883d;
   var html = htm.bind(React.createElement);
   var Navbar = V.Navbar, NavbarHeader = V.NavbarHeader, NavbarItem = V.NavbarItem, NavbarDivider = V.NavbarDivider, NavbarSpacer = V.NavbarSpacer,
