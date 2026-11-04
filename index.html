@@ -755,6 +755,18 @@ code, .mono { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; 
 .res { display: flex; flex-direction: column; gap: var(--space-5); }
 .res-tags { display: flex; gap: var(--space-3); flex-wrap: wrap; }
 .form { display: flex; flex-direction: column; gap: var(--space-7); }
+/* two-column layouts for Help and Queries (0.7.1): main column + side column, stacking under 1100px */
+.split { display: grid; grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr); gap: var(--space-6); align-items: start; }
+.split > * { min-width: 0; }
+.side { display: flex; flex-direction: column; gap: var(--space-6); }
+.empty-c { display: grid; place-items: center; min-height: 280px; }
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-6); counter-reset: st; }
+.steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: var(--space-5); align-items: start; counter-increment: st; }
+.steps li::before { content: counter(st); width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: var(--text-p3); font-weight: 600; color: var(--primary-base); border: 1px solid var(--separations-border); background: var(--card-header); }
+.steps .fw-type { margin: 0; }
+.tips { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: var(--space-4); color: var(--typography-muted); font-size: var(--text-p2); line-height: 150%; }
+pre.req { white-space: pre-wrap; word-break: break-word; margin: 0; padding: var(--space-5); font: var(--text-p3)/155% ui-monospace, 'SF Mono', Menlo, monospace; color: var(--typography-base); background: var(--card-header); border: 1px solid var(--separations-base); border-radius: var(--radius-md, 6px); max-height: 260px; overflow: auto; }
+@media (max-width: 1100px) { .split { grid-template-columns: minmax(0, 1fr); } }
 pre.diag { white-space: pre-wrap; word-break: break-word; margin: var(--space-4) 0 0; font: var(--text-p4)/150% ui-monospace, 'SF Mono', Menlo, monospace; color: var(--typography-muted); max-height: 320px; overflow: auto; }
 
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
@@ -8618,7 +8630,7 @@ __ds_ns.Tree = __ds_scope.Tree;
   function on(t, ev, fn, cap) { t.addEventListener(ev, fn, cap); OFF.push(function () { t.removeEventListener(ev, fn, cap); }); }
   // Reader Shell (live harness) 0.7.0: the view is built from the Flywheel Vision Design System
   // (vision-react bundle, dark theme). Data logic is unchanged from 0.5.x.
-  var VERSION = 'reader-shell-harness/0.7.0';
+  var VERSION = 'reader-shell-harness/0.7.1';
   var V = window.FlywheelVisionDesignSystem_6c883d;
   var html = htm.bind(React.createElement);
   var Navbar = V.Navbar, NavbarHeader = V.NavbarHeader, NavbarItem = V.NavbarItem, NavbarDivider = V.NavbarDivider, NavbarSpacer = V.NavbarSpacer,
@@ -8990,7 +9002,7 @@ __ds_ns.Tree = __ds_scope.Tree;
       return html`<div class="page narrow"><${AlertPanel} severity="error" title="Not Connected" description=${S.error} />${Diag()}</div>`;
     }
     var c = ctx();
-    var body = S.screen === 'reads' ? Reads(c) : S.screen === 'queries' ? Queries() : S.screen === 'activity' ? Activity(c) : S.screen === 'resources' ? Resources(c) : Help(c);
+    var body = S.screen === 'reads' ? Reads(c) : S.screen === 'queries' ? Queries(c) : S.screen === 'activity' ? Activity(c) : S.screen === 'resources' ? Resources(c) : Help(c);
     return html`<div class="shell">
       ${Rail(c)}
       <div class="main">
@@ -9305,11 +9317,41 @@ __ds_ns.Tree = __ds_scope.Tree;
     <//>`;
   }
 
-  function Queries() {
-    return html`<${PanelLayout} border="all" height="auto" style=${{ flex: 'none' }}>
-      <${ContextLayout} icon="chat-messages-bubble" iconColor="slate" title="No Queries"
-        description="Questions from the study team about your submitted reads will appear here. The 23.0 API has no queries endpoint yet, so this page is a placeholder in the live harness." />
-    <//>`;
+  function Queries(c) {
+    var recent = c.done.slice().sort(function (a, b) { return Date.parse((b.transitions || {}).completed || 0) - Date.parse((a.transitions || {}).completed || 0); }).slice(0, 8);
+    var cols = [
+      { key: 'task', header: 'Task', render: function (t) { return html`<a href=${'#/task/' + encodeURIComponent(t.task_id)} class="link mono" onClick=${function (e) { e.preventDefault(); e.stopPropagation(); select(t); }}>${t.task_id}</a>`; } },
+      { key: 'protocol_label', header: 'Protocol' },
+      { key: 'done', header: 'Submitted', noWrap: true, render: function (t) { var e = t.transitions && t.transitions.completed; return e ? when(e) : '—'; } },
+      { key: 'q', header: 'Queries', align: 'right', render: function () { return html`<span class="sub-i">None</span>`; } }
+    ];
+    return html`<div class="split">
+      <div class="side">
+        <${PanelLayout} border="all" height="auto" style=${{ flex: 'none' }}>
+          <div class="empty-c"><${ContextLayout} icon="chat-messages-bubble" iconColor="slate" title="No Queries"
+            description="Questions from the study team about your submitted reads will appear here. The 23.0 API has no queries endpoint yet, so this page is a placeholder in the live harness." /></div>
+        <//>
+        ${recent.length ? html`<${PanelLayout} border="all" padded=${false} height="auto" style=${{ flex: 'none' }}
+            header=${html`<${Typography} variant="h4">Your Submitted Reads<//><${Typography} variant="p3" color="muted">${'Most recent ' + recent.length + ' of ' + c.done.length}<//>`}>
+          <${Table} columns=${cols} rows=${recent} rowKey="_id" onRowClick=${function (t) { select(t); }} />
+        <//>` : null}
+      </div>
+      <div class="side">
+        <${PanelLayout} border="all" height="auto" style=${{ flex: 'none' }} header=${html`<${Typography} variant="h4">How Queries Will Work<//><${Tag} color="slate" title="Proposed" />`}>
+          <ol class="steps">
+            <li><div><${Typography} variant="p2" color="base">The study team raises a question<//><${Typography} variant="p3" color="muted">About a read you've submitted, for example a missing measurement or a response that doesn't match the images.<//></div></li>
+            <li><div><${Typography} variant="p2" color="base">You answer it here<//><${Typography} variant="p3" color="muted">Open the task, check the read, and reply. If the read needs to change, the study team reopens it for you.<//></div></li>
+            <li><div><${Typography} variant="p2" color="base">The study team closes it<//><${Typography} variant="p3" color="muted">Every question, answer and change is kept with the task's history.<//></div></li>
+          </ol>
+        <//>
+        <${PanelLayout} border="all" height="auto" style=${{ flex: 'none' }} header=${html`<${Typography} variant="h4">Status<//>`}>
+          <div class="kv">
+            <div class="kv-i"><${Typography} variant="p4" color="light">Open Queries<//><span class="kv-v">0</span></div>
+            <div class="kv-i"><${Typography} variant="p4" color="light">Reads Submitted<//><span class="kv-v">${c.done.length}</span></div>
+          </div>
+        <//>
+      </div>
+    </div>`;
   }
 
   function minutesOf(t) {
@@ -9377,31 +9419,47 @@ __ds_ns.Tree = __ds_scope.Tree;
     var u = S.user || {};
     var issues = ['Images or viewer', 'Can’t submit or sign', 'Can’t find a task', 'Something else'];
     var tasks = c.mine.concat(c.done);
+    var ua = navigator.userAgent, br = (/Edg\/([\d.]+)/.exec(ua) && 'Edge ' + RegExp.$1.split('.')[0]) || (/Chrome\/([\d.]+)/.exec(ua) && 'Chrome ' + RegExp.$1.split('.')[0]) || (/Firefox\/([\d.]+)/.exec(ua) && 'Firefox ' + RegExp.$1.split('.')[0]) || (/Version\/([\d.]+).*Safari/.exec(ua) && 'Safari ' + RegExp.$1.split('.')[0]) || 'Unknown browser';
+    var text = 'Subject: [Reader] ' + S.hIssue + (S.hTask ? ' · ' + S.hTask : '') + '\nSite: ' + S.origin + '\nEmail: ' + (u.email || '') + '\nApp: ' + VERSION + ' · ' + br + '\n\n' + (S.hMsg || '');
     var send = function () {
-      var text = 'Subject: [Reader] ' + S.hIssue + (S.hTask ? ' · ' + S.hTask : '') + '\nSite: ' + S.origin + '\nEmail: ' + ((S.user && S.user.email) || '') + '\n\n' + S.hMsg;
       try { navigator.clipboard.writeText(text).then(function () { flash('Request copied. Paste it into the support form.'); }, function () { flash('Copy blocked by the frame; select the text and copy it.'); }); } catch (e) {}
       window.open('https://support.flywheel.io/hc/en-us/requests/new', '_blank', 'noopener');
     };
+    var tips = {
+      'Images or viewer': ['Reload the viewer tab once; a series that stalls on first load often comes up on the second.', 'Note the series number and what you see (blank, spinning, wrong images).', 'Your browser and app version are already in the request.'],
+      'Can’t submit or sign': ['Note which question or button is highlighted when Submit won’t go through.', 'Copy any error message word for word.', 'Pick the task below so support can open the same read.'],
+      'Can’t find a task': ['Press Refresh at the top right; new assignments show after a refresh.', 'Check the Reads list filters.', 'If a case should be yours, your study coordinator can confirm the assignment.'],
+      'Something else': ['Describe what you expected and what happened instead.', 'Pick a task below if it is about one read.']
+    }[S.hIssue] || [];
     return html`<div class="stack">
       <${Typography} variant="p2">Goes to Flywheel Support. Your email, the site and the task are filled in for you.<//>
-      <${PanelLayout} border="all" height="auto" style=${{ flex: 'none', maxWidth: '720px' }}
-        footer=${html`<${Typography} variant="p4" color="light">Opens support.flywheel.io in a new tab and copies your request.<//><${Button} endIcon="open" onClick=${send}>Open Support Request...<//>`}>
-        <div class="form">
-          <${WrappedInput} title="Issue">
-            <${ChipGroup}>${issues.map(function (x) { var on = S.hIssue === x; return html`<${Chip} key=${x + ':' + on} value=${x} title=${x} color="primary" selected=${on} onSelect=${function () { set({ hIssue: x }); }} />`; })}<//>
-          <//>
-          <${WrappedInput} title="Task">
-            <${Select} name="htask" width=${280} value=${S.hTask || '__none'} aria-label="Task" onChange=${function (v) { set({ hTask: v === '__none' ? '' : v }); }}>
-              <${SelectItem} value="__none">Not About One Task<//>
-              ${tasks.map(function (t) { return html`<${SelectItem} key=${t.task_id} value=${t.task_id}>${t.task_id}<//>`; })}
+      <div class="split">
+        <${PanelLayout} border="all" height="auto" style=${{ flex: 'none' }}
+          footer=${html`<${Typography} variant="p4" color="light">Opens support.flywheel.io in a new tab and copies your request.<//><${Button} endIcon="open" onClick=${send}>Open Support Request...<//>`}>
+          <div class="form">
+            <${WrappedInput} title="Issue">
+              <${ChipGroup}>${issues.map(function (x) { var on = S.hIssue === x; return html`<${Chip} key=${x + ':' + on} value=${x} title=${x} color="primary" selected=${on} onSelect=${function () { set({ hIssue: x }); }} />`; })}<//>
             <//>
+            <${WrappedInput} title="Task">
+              <${Select} name="htask" width=${360} value=${S.hTask || '__none'} aria-label="Task" onChange=${function (v) { set({ hTask: v === '__none' ? '' : v }); }}>
+                <${SelectItem} value="__none">Not About One Task<//>
+                ${tasks.map(function (t) { return html`<${SelectItem} key=${t.task_id} value=${t.task_id}>${t.task_id}<//>`; })}
+              <//>
+            <//>
+            <${WrappedInput} title="What Happened" helperText="Don't include patient information.">
+              <${TextArea} name="hmsg" rows=${8} fullWidth=${true} placeholder="e.g. series 3 never finishes loading" value=${S.hMsg} onChange=${function (v) { S.hMsg = v; render(); }} />
+            <//>
+          </div>
+        <//>
+        <div class="side">
+          <${PanelLayout} border="all" height="auto" style=${{ flex: 'none' }} header=${html`<${Typography} variant="h4">Your Request<//><${Typography} variant="p3" color="muted">Copied when you open the form<//>`}>
+            <pre class="req">${text}</pre>
           <//>
-          <${WrappedInput} title="What Happened" helperText="Don't include patient information.">
-            <${TextArea} name="hmsg" rows=${4} fullWidth=${true} placeholder="e.g. series 3 never finishes loading" value=${S.hMsg} onChange=${function (v) { S.hMsg = v; render(); }} />
-          <//>
-          <${Typography} variant="p3">We send: ${u.email || 'your email'} · ${S.origin} · subject "[Reader] ${S.hIssue}${S.hTask ? ' · ' + S.hTask : ''}".<//>
+          ${tips.length ? html`<${PanelLayout} border="all" height="auto" style=${{ flex: 'none' }} header=${html`<${Typography} variant="h4">Before You Send<//>`}>
+            <ul class="tips">${tips.map(function (x) { return html`<li key=${x}>${x}</li>`; })}</ul>
+          <//>` : null}
         </div>
-      <//>
+      </div>
     </div>`;
   }
 
