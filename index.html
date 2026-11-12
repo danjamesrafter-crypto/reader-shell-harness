@@ -701,6 +701,7 @@ html.fw-embedded:not(.fw-own-close) .topbar > :last-child { margin-right: 48px; 
 .topbar { flex-shrink: 0; position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); min-height: 50px; padding: var(--space-3) 56px var(--space-3) var(--space-6); background: var(--card-background); border-bottom: 1px solid var(--separations-base); flex-wrap: wrap; }
 .tb-left, .tb-right { display: flex; align-items: center; gap: var(--space-5); flex-wrap: wrap; min-width: 0; }
 .tb-right { gap: var(--space-4); }
+.pop-actions { display: flex; gap: var(--space-4); justify-content: center; flex-wrap: wrap; }
 .work { display: inline-flex; align-items: center; gap: var(--space-4); padding: 0 var(--space-5); height: 30px; border: 1px solid var(--separations-border); border-radius: var(--radius-chip); white-space: nowrap; }
 .work-bar { width: 72px; }
 .page { flex-shrink: 0; padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-6); width: 100%; }
@@ -8631,7 +8632,7 @@ __ds_ns.Tree = __ds_scope.Tree;
   function on(t, ev, fn, cap) { t.addEventListener(ev, fn, cap); OFF.push(function () { t.removeEventListener(ev, fn, cap); }); }
   // Reader Shell (live harness) 0.7.0: the view is built from the Flywheel Vision Design System
   // (vision-react bundle, dark theme). Data logic is unchanged from 0.5.x.
-  var VERSION = 'reader-shell-harness/0.7.1';
+  var VERSION = 'reader-shell-harness/0.8.0';
   var V = window.FlywheelVisionDesignSystem_6c883d;
   var html = htm.bind(React.createElement);
   var Navbar = V.Navbar, NavbarHeader = V.NavbarHeader, NavbarItem = V.NavbarItem, NavbarDivider = V.NavbarDivider, NavbarSpacer = V.NavbarSpacer,
@@ -8666,7 +8667,99 @@ __ds_ns.Tree = __ds_scope.Tree;
     try { return new URL(document.referrer).origin; } catch (e) { return ''; }
   }
 
+  // ---- Pop-out (0.8.0) ---------------------------------------------------------------------------
+  // Opens the shell in its own browser tab at its own URL (real hash routes, back/forward, refresh) to
+  // mimic the path-mounted /reader/ product. The tab has no Flywheel connection of its own: the dialog
+  // that opened it relays apiRequest calls over postMessage (same origin, that one window, that one
+  // method) and shows a small "running in a separate tab" panel. Closing the dialog disconnects the tab.
+  // Needs: no COOP on the Flywheel site and an unsandboxed extension iframe (both true on r6nvg8, 11-12).
+  var POPOUT = !EMBED && /[?&]popout=1(&|$)/.test(location.search);
+  var RELAY = { apiRequest: 1 };
+  var pop = { win: null, timer: null };
+  function relayMsg(w, m) { m.fwRelay = 1; try { w.postMessage(m, location.origin); } catch (e) { note('Relay post failed: ' + e.message); } }
+  function plain(x) { return x == null ? x : JSON.parse(JSON.stringify(x)); }
+  function popUrl() {
+    var qs = (location.search || '').replace(/[?&]popout=1/, '');
+    return location.pathname + (qs ? qs + '&' : '?') + 'popout=1' + toHash();
+  }
+  function popOut() {
+    var w = window.open(popUrl(), 'readerShellPopout');
+    if (!w) { flash('The browser blocked the new tab. Allow pop-ups for this page and try again.'); return; }
+    pop.win = w; S.poppedOut = true; S.wantFull = false; if (fsOn()) fsExit();
+    note('Popped out to its own tab: ' + popUrl());
+    clearInterval(pop.timer);
+    pop.timer = setInterval(function () { if (!pop.win || pop.win.closed) { popBack(); } }, 1000);
+    render();
+  }
+  function popBack() {
+    clearInterval(pop.timer);
+    if (pop.win && !pop.win.closed) { relayMsg(pop.win, { kind: 'bye', reason: 'back' }); try { pop.win.close(); } catch (e) {} }
+    pop.win = null; S.poppedOut = false; note('Back in the Flywheel window'); render(); load();
+  }
+  function popFocus() { if (pop.win && !pop.win.closed) { try { pop.win.focus(); } catch (e) {} } else popBack(); }
+  // Dialog side: answer the tab we opened, and nobody else.
+  function relayServe(e) {
+    var d = e.data;
+    if (POPOUT || e.origin !== location.origin || !pop.win || e.source !== pop.win || !d || d.fwRelay !== 1) return;
+    if (d.kind === 'ready') {
+      relayMsg(pop.win, { kind: 'hello', user: plain(S.user), params: plain(S.params), container: plain(S.ext && S.ext.container), origin: S.origin, version: VERSION });
+      return;
+    }
+    if (d.kind !== 'req') return;
+    var w = pop.win;
+    if (!RELAY[d.method] || !S.ext) { relayMsg(w, { kind: 'res', id: d.id, ok: false, error: { message: 'Not allowed: ' + d.method } }); return; }
+    note('Relay ' + (d.args && d.args[0]) + ' ' + (d.args && d.args[1]));
+    Promise.resolve().then(function () { return S.ext[d.method].apply(S.ext, d.args || []); })
+      .then(function (r) { relayMsg(w, { kind: 'res', id: d.id, ok: true, result: r }); },
+            function (err) { relayMsg(w, { kind: 'res', id: d.id, ok: false, error: { message: (err && err.message) || String(err), status: err && err.status } }); });
+  }
+  // Tab side: a stand-in for the SDK's Extension that forwards apiRequest to the dialog.
+  function relayExt(h) {
+    var seq = 0, waiting = {};
+    on(window, 'message', function (e) {
+      var d = e.data;
+      if (e.origin !== location.origin || e.source !== window.opener || !d || d.fwRelay !== 1) return;
+      if (d.kind === 'res' && waiting[d.id]) {
+        var w = waiting[d.id]; delete waiting[d.id];
+        if (d.ok) w.res(d.result); else { var er = new Error((d.error && d.error.message) || 'Request failed'); er.status = d.error && d.error.status; w.rej(er); }
+      }
+      if (d.kind === 'bye') disconnect(d.reason === 'back' ? 'Reader Shell moved back into the Flywheel window.' : 'The Flywheel window closed Reader Shell, so this tab is no longer connected.');
+    });
+    return { user: h.user, params: h.params || {}, container: h.container || null, popout: true,
+      apiRequest: function () {
+        var args = [].slice.call(arguments);
+        return new Promise(function (res, rej) {
+          if (S.disconnected || !window.opener || window.opener.closed) { rej(new Error('Not connected to Flywheel')); return; }
+          var id = ++seq; waiting[id] = { res: res, rej: rej };
+          relayMsg(window.opener, { kind: 'req', id: id, method: 'apiRequest', args: args });
+          setTimeout(function () { if (waiting[id]) { delete waiting[id]; rej(new Error('No answer from the Flywheel window')); } }, 30000);
+        });
+      } };
+  }
+  function connectPopout() {
+    document.title = 'Reader Workspace · Flywheel';
+    S.wantFull = false;
+    if (!window.opener) { disconnect('This tab isn’t connected to Flywheel. Open Reader Shell from Flywheel and use Pop Out.'); return; }
+    var got = false;
+    function onHello(e) {
+      var d = e.data;
+      if (got || e.origin !== location.origin || e.source !== window.opener || !d || d.fwRelay !== 1 || d.kind !== 'hello') return;
+      got = true;
+      S.ext = relayExt(d); S.user = d.user || null; S.params = d.params || {}; S.origin = d.origin || ''; S.canWrite = true;
+      note('Popped out (' + VERSION + '), relaying through the Flywheel window. Origin ' + (S.origin || 'unknown') + '. User ' + (S.user ? S.user._id : 'unknown') + '.');
+      fromHash();
+      load();
+    }
+    on(window, 'message', onHello);
+    relayMsg(window.opener, { kind: 'ready' });
+    setTimeout(function () { if (!got) disconnect('No answer from the Flywheel window. Reopen Reader Shell from Flywheel and use Pop Out.'); }, 5000);
+    var iv = setInterval(function () { if (!window.opener || window.opener.closed) { clearInterval(iv); disconnect('The Flywheel window closed Reader Shell, so this tab is no longer connected.'); } }, 2000);
+    OFF.push(function () { clearInterval(iv); });
+  }
+  function disconnect(msg) { if (S.disconnected) return; S.disconnected = msg; S.loading = false; note('Disconnected: ' + msg); render(); }
+
   function connect() {
+    if (POPOUT) { connectPopout(); return; }
     if (EMBED) {
       S.ext = OPTS.ext; S.user = OPTS.ext.user || null; S.params = OPTS.ext.params || {}; S.origin = OPTS.origin || flywheelOrigin(); S.canWrite = true;
       note('Embedded (' + VERSION + ') in ' + (OPTS.host || 'a host app') + '. Origin ' + (S.origin || 'unknown') + '. User ' + (S.user ? S.user._id : 'unknown') + '.');
@@ -8964,7 +9057,7 @@ __ds_ns.Tree = __ds_scope.Tree;
     }
     if (S.screen === 'help') S.hTask = qs.task || '';
   }
-  function syncHash() { if (EMBED) return; var want = toHash(); if (location.hash !== want) { try { history.replaceState(null, '', want); } catch (e) { location.hash = want; } } }
+  function syncHash() { if (EMBED) return; var want = toHash(); if (location.hash !== want) { try { if (POPOUT && location.hash && want.split('?')[0] !== location.hash.split('?')[0]) history.pushState(null, '', want); else history.replaceState(null, '', want); } catch (e) { location.hash = want; } } }
   if (!EMBED) on(window, 'hashchange', function () { fromHash(); render(); });
 
   // ---- Actions (state change + render) ---------------------------------------------------------
@@ -9002,6 +9095,12 @@ __ds_ns.Tree = __ds_scope.Tree;
     }
     if (S.error && !S.tasks.length) {
       return html`<div class="page narrow"><${AlertPanel} severity="error" title="Not Connected" description=${S.error} />${Diag()}</div>`;
+    }
+    if (S.disconnected) {
+      return html`<div class="center"><${ContextLayout} icon="link-unlink" iconColor="orange" title="Disconnected From Flywheel" description=${S.disconnected + ' This tab borrows the Flywheel window’s connection; the real /reader/ app will sign in on its own.'}><${Button} color="slate" variant="outlined" startIcon="close" onClick=${function () { window.close(); }}>Close This Tab<//><//></div>`;
+    }
+    if (S.poppedOut) {
+      return html`<div class="center"><${ContextLayout} icon="open" iconColor="primary" title="Running In A Separate Tab" description="Reader Shell is open in its own browser tab. Keep this window open: the tab uses its connection to Flywheel."><div class="pop-actions"><${Button} color="primary" endIcon="open" onClick=${popFocus}>Go To Tab<//><${Button} variant="outlined" color="slate" startIcon="arrow-back" onClick=${popBack}>Bring Back Here<//></div><//></div>`;
     }
     var c = ctx();
     var body = S.screen === 'reads' ? Reads(c) : S.screen === 'queries' ? Queries(c) : S.screen === 'activity' ? Activity(c) : S.screen === 'resources' ? Resources(c) : Help(c);
@@ -9072,6 +9171,8 @@ __ds_ns.Tree = __ds_scope.Tree;
           <span><${Tag} color="secondary" icon="lock" title="Blinded" /></span>
         <//>
         <${Tooltip} title="Refresh" position="bottom"><${IconButton} icon="rotate-refresh" color="slate" aria-label="Refresh" onClick=${function () { load(); }} /><//>
+        ${POPOUT ? html`<${Tooltip} title="Preview of the stand-alone /reader/ app: its own tab and URL. Data comes through the Flywheel window that opened it." position="bottom"><span><${Tag} color="primary" icon="open" title="Own Tab · Preview" /></span><//>` : null}
+        ${!EMBED && !POPOUT && S.ext ? html`<${Tooltip} title="Open In Its Own Tab (Preview Of /reader/)" position="bottom"><${IconButton} icon="open" color="slate" aria-label="Open in its own tab" onClick=${popOut} /><//>` : null}
         ${OPTS.onExit ? html`<${Button} variant="outlined" color="slate" size="small" startIcon="arrow-back" onClick=${function () { OPTS.onExit(); }}>Exit To Home<//>` : null}
       </div>
     </header>`;
@@ -9491,6 +9592,10 @@ __ds_ns.Tree = __ds_scope.Tree;
   var fsCan = !EMBED && !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
   on(document, 'pointerdown', function (e) { if (fsCan && S.wantFull && !fsOn() && !(e.target.closest && e.target.closest('[data-value="fullscreen"]'))) fsEnter(); }, true);
   on(document, 'fullscreenchange', function () { if (!fsOn() && !document.hidden) { S.wantFull = false; note('Left full screen'); } render(); });
+  if (!EMBED && !POPOUT) {
+    on(window, 'message', relayServe);
+    on(window, 'pagehide', function () { if (pop.win && !pop.win.closed) relayMsg(pop.win, { kind: 'bye' }); });
+  }
   render();
   connect();
   return { unmount: function () { OFF.forEach(function (f) { f(); }); clearTimeout(flash.t); root.unmount(); } };
